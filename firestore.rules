@@ -1,0 +1,93 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net default catch-all: DENY ALL
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // IsSignedIn helper
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // IsOwner helper to isolate user spaces
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Id validation boundary helper
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Document UserBook fields validator entity
+    function isValidUserBook(data) {
+      return data.keys().hasAll(['id', 'title', 'author', 'paragraphs', 'chapters', 'progress', 'processingStatus'])
+          && data.id is string && data.id.size() <= 128
+          && data.title is string && data.title.size() <= 2000
+          && data.author is string && data.author.size() <= 2000
+          && data.paragraphs is list && data.paragraphs.size() <= 3000
+          && data.chapters is list && data.paragraphs.size() <= 1000
+          && data.progress is map
+          && data.progress.paragraphIndex is int
+          && data.progress.sentenceIndex is int
+          && data.processingStatus is string
+          && (data.processingStatus == "unprocessed" || data.processingStatus == "ready" || data.processingStatus == "processing" || data.processingStatus == "failed");
+    }
+
+    // Highlight fields validator entity
+    function isValidUserHighlight(data) {
+      return data.keys().hasAll(['id', 'documentId', 'paragraphIndex', 'sentenceIndex', 'text', 'color', 'createdAt'])
+          && data.id is string && data.id.size() <= 128
+          && data.documentId is string && data.documentId.size() <= 128
+          && data.paragraphIndex is int
+          && data.sentenceIndex is int
+          && data.text is string && data.text.size() <= 100000
+          && data.color is string && data.color.size() <= 200
+          && (data.note == null || (data.note is string && data.note.size() <= 100000))
+          && data.createdAt is string;
+    }
+
+    // Bookmark fields validator entity
+    function isValidUserBookmark(data) {
+      return data.keys().hasAll(['id', 'documentId', 'paragraphIndex', 'sentenceIndex', 'label', 'createdAt'])
+          && data.id is string && data.id.size() <= 128
+          && data.documentId is string && data.documentId.size() <= 128
+          && data.paragraphIndex is int
+          && data.sentenceIndex is int
+          && data.label is string && data.label.size() <= 2000
+          && data.createdAt is string;
+    }
+
+    // User scope match rules
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      // Core Books matching rules
+      match /books/{bookId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(bookId) && isValidUserBook(request.resource.data);
+        allow update: if isOwner(userId) && isValidUserBook(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+
+      // Core Highlights matching rules
+      match /highlights/{highlightId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(highlightId) && isValidUserHighlight(request.resource.data);
+        allow update: if isOwner(userId) && isValidUserHighlight(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+
+      // Core Bookmarks matching rules
+      match /bookmarks/{bookmarkId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(bookmarkId) && isValidUserBookmark(request.resource.data);
+        allow update: if isOwner(userId) && isValidUserBookmark(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}

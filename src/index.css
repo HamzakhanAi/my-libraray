@@ -1,0 +1,98 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400;1,700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Literata:ital,opsz,wght@0,7..72,200..900;1,7..72,205..900&display=swap');
+@import "tailwindcss";
+
+/* Accessibility Font Overrides */
+
+@font-face {
+  font-family: 'OpenDyslexic';
+  src: url('https://cdn.jsdelivr.net/npm/opendyslexic@1.0.3/OpenDyslexic-Regular.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Literata", Georgia, serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+/* Base custom font utility classes */
+.font-dyslexic {
+  font-family: 'OpenDyslexic', sans-serif !important;
+}
+
+.font-atkinson {
+  font-family: 'Atkinson Hyperlegible', sans-serif !important;
+}
+
+/* Semi-custom semantic scrollbars/rulers */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Theme classes on app containers */
+.theme-daylight {
+  --surface-page: #FAF8F3;
+  --surface-elevated: #FFFFFF;
+  --ink-primary: #1B1B1A;
+  --ink-secondary: #5C5C59;
+  --accent: #2F6B5E;
+  background-color: var(--surface-page);
+  color: var(--ink-primary);
+}
+
+.theme-parchment {
+  --surface-page: #F4ECD8;
+  --surface-elevated: #FCF8F0;
+  --ink-primary: #3A2E22;
+  --ink-secondary: #706253;
+  --accent: #8B5A2B;
+  background-color: var(--surface-page);
+  color: var(--ink-primary);
+}
+
+.theme-midnight {
+  --surface-page: #121315;
+  --surface-elevated: #1A1C1E;
+  --ink-primary: #E6E2D8;
+  --ink-secondary: #A39E93;
+  --accent: #7BB7A8;
+  background-color: var(--surface-page);
+  color: var(--ink-primary);
+}
+
+.theme-contrast {
+  --surface-page: #000000;
+  --surface-elevated: #111111;
+  --ink-primary: #FFFFFF;
+  --ink-secondary: #E0E0E0;
+  --accent: #00FFCC;
+  background-color: var(--surface-page);
+  color: var(--ink-primary);
+}
+
+/* Transition properties for smooth layouts */
+.transition-theme {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Interactive word spacing selectors */
+.word-spacing-wide {
+  word-spacing: 0.18em;
+  letter-spacing: 0.05em;
+}
+
+.word-spacing-wider {
+  word-spacing: 0.28em;
+  letter-spacing: 0.08em;
+}

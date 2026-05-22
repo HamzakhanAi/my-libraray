@@ -1,0 +1,6 @@
+{
+  "name": "Lumen Reader",
+  "description": "An AI-powered reading and listing platform turning books and PDFs into fully synchronized, narratable experiences.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,160 @@
+{
+  "entities": {
+    "UserBook": {
+      "title": "UserBook",
+      "description": "An uploaded book document with synchronized paragraphs, chapters, and progress statistics",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Strict document UUID identifier"
+        },
+        "title": {
+          "type": "string",
+          "description": "Display title of the book"
+        },
+        "author": {
+          "type": "string",
+          "description": "Author or source category"
+        },
+        "coverUrl": {
+          "type": "string",
+          "description": "Optional illustration cover asset location link"
+        },
+        "paragraphs": {
+          "type": "array",
+          "description": "Array of paragraph sentence nodes mapping content hierarchies"
+        },
+        "chapters": {
+          "type": "array",
+          "description": "Array of chapter index checkpoints for page jumps"
+        },
+        "progress": {
+          "type": "object",
+          "description": "Latest user position tracking coordinates"
+        },
+        "durationMinutes": {
+          "type": "number",
+          "description": "Total length estimate in reading minutes"
+        },
+        "wordCount": {
+          "type": "number",
+          "description": "Total words parsed in document prose"
+        },
+        "processingStatus": {
+          "type": "string",
+          "description": "Tuning pipeline phase identifier"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "author",
+        "paragraphs",
+        "chapters",
+        "progress"
+      ]
+    },
+    "UserHighlight": {
+      "title": "UserHighlight",
+      "description": "A highlight section, optionally holding contextual note annotation summaries",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Primary highlight log identifier"
+        },
+        "documentId": {
+          "type": "string",
+          "description": "The target book key linking highlights to its library entry"
+        },
+        "paragraphIndex": {
+          "type": "number",
+          "description": "Paragraph index coordinate"
+        },
+        "sentenceIndex": {
+          "type": "number",
+          "description": "Sentence index coordinate"
+        },
+        "text": {
+          "type": "string",
+          "description": "Plain text of the highlighted reading segment"
+        },
+        "color": {
+          "type": "string",
+          "description": "Tailwind marker color theme wrapper"
+        },
+        "note": {
+          "type": "string",
+          "description": "Optional research annotations or journal thoughts added by the reader"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Timestamp representation"
+        }
+      },
+      "required": [
+        "id",
+        "documentId",
+        "paragraphIndex",
+        "sentenceIndex",
+        "text",
+        "color",
+        "createdAt"
+      ]
+    },
+    "UserBookmark": {
+      "title": "UserBookmark",
+      "description": "Custom bookmark references logged during student reviews",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique index"
+        },
+        "documentId": {
+          "type": "string",
+          "description": "Referenced book ID"
+        },
+        "paragraphIndex": {
+          "type": "number",
+          "description": "Paragraph index key block"
+        },
+        "sentenceIndex": {
+          "type": "number",
+          "description": "Sentence index cursor position"
+        },
+        "label": {
+          "type": "string",
+          "description": "Custom textual description bookmark header"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "documentId",
+        "paragraphIndex",
+        "sentenceIndex",
+        "label",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "users/{userId}/books/{bookId}": {
+      "schema": "UserBook",
+      "description": "Individual files and books imported into private user libraries"
+    },
+    "users/{userId}/highlights/{highlightId}": {
+      "schema": "UserHighlight",
+      "description": "Reading color marks and study notes curated by the reader"
+    },
+    "users/{userId}/bookmarks/{bookmarkId}": {
+      "schema": "UserBookmark",
+      "description": "User specific page navigation landmarks bookmarks"
+    }
+  }
+}
