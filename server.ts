@@ -5,7 +5,8 @@
 
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { randomUUID } from "crypto";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 
@@ -14,7 +15,21 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const PORT = 3000;
+app.use((req, res, next) => {
+  const hostHeader = req.headers.host;
+  const isLocalIpOrigin = req.hostname === "127.0.0.1";
+  const shouldNormalizeOrigin = (req.method === "GET" || req.method === "HEAD") && !req.path.startsWith("/api/");
+
+  if (!hostHeader || !isLocalIpOrigin || !shouldNormalizeOrigin) {
+    next();
+    return;
+  }
+
+  const normalizedHost = hostHeader.replace(/^127\.0\.0\.1(?=[:]|$)/, "localhost");
+  res.redirect(307, `${req.protocol}://${normalizedHost}${req.originalUrl}`);
+});
+
+const PORT = Number(process.env.PORT || 3000);
 
 // Initialize GoogleGenAI client
 const apiKey = process.env.GEMINI_API_KEY;
@@ -27,121 +42,271 @@ const ai = new GoogleGenAI({
   },
 });
 
+type KokoroSegmentRequest = {
+  id: string;
+  text: string;
+};
+
+type KokoroSegmentResult = {
+  id: string;
+  audio: string;
+};
+
+type KokoroPendingRequest = {
+  resolve: (results: KokoroSegmentResult[]) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+};
+
+const DEFAULT_KOKORO_VOICE = "af_sarah";
+const KOKORO_WORKER_PATH = path.join(process.cwd(), "scripts", "kokoro_worker.py");
+const KOKORO_PYTHON_BIN = process.env.KOKORO_PYTHON_BIN || process.env.PYTHON_PATH || "python3";
+const KOKORO_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
+let kokoroWorker: ChildProcessWithoutNullStreams | null = null;
+let kokoroBootPromise: Promise<void> | null = null;
+let kokoroStdoutBuffer = "";
+
+const kokoroPendingRequests = new Map<string, KokoroPendingRequest>();
+
+function rejectAllKokoroPendingRequests(error: Error) {
+  for (const [requestId, pending] of kokoroPendingRequests.entries()) {
+    clearTimeout(pending.timeout);
+    pending.reject(error);
+    kokoroPendingRequests.delete(requestId);
+  }
+}
+
+function resetKokoroWorkerState() {
+  kokoroWorker = null;
+  kokoroStdoutBuffer = "";
+}
+
+function handleKokoroWorkerLine(line: string, onReady?: () => void) {
+  let payload: any;
+
+  try {
+    payload = JSON.parse(line);
+  } catch {
+    console.log(`[Kokoro worker stdout] ${line}`);
+    return;
+  }
+
+  if (payload?.event === "ready") {
+    onReady?.();
+    return;
+  }
+
+  const requestId = typeof payload?.requestId === "string" ? payload.requestId : null;
+  if (!requestId) {
+    return;
+  }
+
+  const pending = kokoroPendingRequests.get(requestId);
+  if (!pending) {
+    return;
+  }
+
+  clearTimeout(pending.timeout);
+  kokoroPendingRequests.delete(requestId);
+
+  if (!payload.ok) {
+    pending.reject(new Error(payload.error || "Kokoro synthesis failed."));
+    return;
+  }
+
+  pending.resolve(Array.isArray(payload.results) ? payload.results : []);
+}
+
+function startKokoroWorker() {
+  if (kokoroWorker && !kokoroWorker.killed) {
+    return Promise.resolve();
+  }
+
+  if (kokoroBootPromise) {
+    return kokoroBootPromise;
+  }
+
+  kokoroBootPromise = new Promise<void>((resolve, reject) => {
+    const child = spawn(KOKORO_PYTHON_BIN, [KOKORO_WORKER_PATH], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        PYTORCH_ENABLE_MPS_FALLBACK: process.env.PYTORCH_ENABLE_MPS_FALLBACK || "1",
+      },
+    });
+
+    kokoroWorker = child;
+    kokoroStdoutBuffer = "";
+
+    let workerReady = false;
+    let stderrLog = "";
+
+    const markReady = () => {
+      if (workerReady) {
+        return;
+      }
+      workerReady = true;
+      resolve();
+    };
+
+    const failBoot = (message: string) => {
+      if (workerReady) {
+        return;
+      }
+      workerReady = true;
+      reject(new Error(message));
+    };
+
+    child.stdout.on("data", (chunk) => {
+      kokoroStdoutBuffer += chunk.toString();
+
+      let lineBreakIndex = kokoroStdoutBuffer.indexOf("\n");
+      while (lineBreakIndex !== -1) {
+        const line = kokoroStdoutBuffer.slice(0, lineBreakIndex).trim();
+        kokoroStdoutBuffer = kokoroStdoutBuffer.slice(lineBreakIndex + 1);
+
+        if (line) {
+          handleKokoroWorkerLine(line, markReady);
+        }
+
+        lineBreakIndex = kokoroStdoutBuffer.indexOf("\n");
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const message = chunk.toString();
+      stderrLog += message;
+      console.error(`[Kokoro worker stderr] ${message.trim()}`);
+    });
+
+    child.once("error", (error) => {
+      resetKokoroWorkerState();
+      rejectAllKokoroPendingRequests(error);
+      failBoot(`Failed to start Kokoro worker with ${KOKORO_PYTHON_BIN}: ${error.message}`);
+    });
+
+    child.once("exit", (code, signal) => {
+      const reason = `Kokoro worker exited (code: ${code ?? "null"}, signal: ${signal ?? "none"})${stderrLog ? `\n${stderrLog.trim()}` : ""}`;
+      resetKokoroWorkerState();
+      rejectAllKokoroPendingRequests(new Error(reason));
+      failBoot(reason);
+    });
+  }).finally(() => {
+    kokoroBootPromise = null;
+  });
+
+  return kokoroBootPromise;
+}
+
+async function synthesizeWithKokoro(segments: KokoroSegmentRequest[], voiceName = DEFAULT_KOKORO_VOICE, speed = 1) {
+  await startKokoroWorker();
+
+  if (!kokoroWorker) {
+    throw new Error("Kokoro worker is unavailable.");
+  }
+
+  return new Promise<KokoroSegmentResult[]>((resolve, reject) => {
+    const requestId = randomUUID();
+    const timeout = setTimeout(() => {
+      kokoroPendingRequests.delete(requestId);
+      reject(new Error("Kokoro synthesis timed out."));
+    }, KOKORO_REQUEST_TIMEOUT_MS);
+
+    kokoroPendingRequests.set(requestId, {
+      resolve,
+      reject,
+      timeout,
+    });
+
+    const payload = JSON.stringify({
+      requestId,
+      voiceName,
+      speed,
+      segments,
+    });
+
+    kokoroWorker.stdin.write(`${payload}\n`, (error) => {
+      if (!error) {
+        return;
+      }
+
+      clearTimeout(timeout);
+      kokoroPendingRequests.delete(requestId);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    });
+  });
+}
+
 // API Routes
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", mode: process.env.NODE_ENV || "development" });
 });
 
-// 1. Text-To-Speech API with Kokoro open synthesis engine and fallback pipelines
+// 1. Text-To-Speech API backed only by local hexgrad/kokoro
 app.post("/api/tts", async (req, res) => {
   try {
-    const { text, voiceName } = req.body;
-    
+    const { text, voiceName, speed } = req.body;
+
     if (!text || text.trim() === "") {
       return res.status(400).json({ error: "Text is required for TTS" });
     }
 
-    const targetVoice = voiceName || "af_sarah";
-    let audioBase64 = "";
-    const errorLog: string[] = [];
+    const targetVoice = typeof voiceName === "string" && voiceName.trim() ? voiceName.trim() : DEFAULT_KOKORO_VOICE;
+    const targetSpeed = typeof speed === "number" && Number.isFinite(speed) ? speed : 1;
+    const [result] = await synthesizeWithKokoro([
+      {
+        id: "segment-0",
+        text: text.trim(),
+      },
+    ], targetVoice, targetSpeed);
 
-    // Attempt 1: Active open-source Kokoro Space endpoints
-    const endpoints = [
-      "https://amsc-kokoro-tts.hf.space/v1/audio/speech",
-      "https://g94-kokoro-82m.hf.space/v1/audio/speech",
-      "https://gauss-st-kokoro-tts-api.hf.space/v1/audio/speech",
-      "https://hexgrad-kokoro-82m.hf.space/v1/audio/speech",
-    ];
-
-    for (const url of endpoints) {
-      try {
-        console.log(`[TTS] Attempting Kokoro fallback on: ${url} (Voice: ${targetVoice})`);
-        const response = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: "kokoro",
-            input: text.trim(),
-            voice: targetVoice,
-            response_format: "wav",
-            speed: 1.0,
-          }),
-        });
-
-        if (response.ok) {
-          const arrayBuffer = await response.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
-          audioBase64 = buffer.toString("base64");
-          console.log(`[TTS] Sourced successfully from Kokoro Space: ${url}`);
-          return res.json({ audio: audioBase64 });
-        } else {
-          const errText = await response.text().catch(() => "");
-          errorLog.push(`${url} [status ${response.status}]: ${errText.substring(0, 100)}`);
-        }
-      } catch (err: any) {
-        errorLog.push(`${url} [connection error]: ${err.message || err}`);
-      }
+    if (!result?.audio) {
+      return res.status(502).json({ error: "Kokoro did not return audio." });
     }
 
-    // Attempt 3: Gradio API predict interface fallback
-    try {
-      const gradioUrl = "https://g94-kokoro-82m.hf.space/api/predict";
-      console.log(`[TTS] Attempting Gradio fallback predict at: ${gradioUrl}`);
-      const response = await fetch(gradioUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          data: [
-            text.trim(),
-            targetVoice,
-            1.0, // speed
-            "en-us",
-          ],
-        }),
-      });
-
-      if (response.ok) {
-        const resJson: any = await response.json();
-        if (resJson && resJson.data && resJson.data[0]) {
-          const item = resJson.data[0];
-          if (typeof item === "string" && item.startsWith("data:audio/")) {
-            const parts = item.split(",");
-            audioBase64 = parts[1] || parts[0];
-          } else if (item && typeof item === "object") {
-            if (item.data && typeof item.data === "string") {
-              const parts = item.data.split(",");
-              audioBase64 = parts[1] || parts[0];
-            } else if (item.name) {
-              const fileUrl = `https://g94-kokoro-82m.hf.space/file=${item.name}`;
-              const fileRes = await fetch(fileUrl);
-              if (fileRes.ok) {
-                const arrBuf = await fileRes.arrayBuffer();
-                audioBase64 = Buffer.from(arrBuf).toString("base64");
-              }
-            }
-          }
-        }
-      }
-    } catch (err: any) {
-      errorLog.push(`Gradio fallback error: ${err.message || err}`);
-    }
-
-    if (!audioBase64) {
-      console.error("[TTS] All server-side generation mechanisms exhausted. Tracelog:", errorLog);
-      return res.status(502).json({
-        error: "Server-side TTS generation exhausted",
-        details: errorLog.join(" | "),
-      });
-    }
-
-    res.json({ audio: audioBase64 });
+    res.json({
+      audio: result.audio,
+      engine: "hexgrad/kokoro",
+      voiceName: targetVoice,
+    });
   } catch (err: any) {
     console.error("Critical server-side TTS endpoint crash:", err);
-    res.status(500).json({ error: err.message || "Error generating speech with server-side TTS" });
+    res.status(500).json({ error: err.message || "Error generating speech with Kokoro" });
+  }
+});
+
+app.post("/api/tts/batch", async (req, res) => {
+  try {
+    const { segments, voiceName, speed } = req.body;
+
+    if (!Array.isArray(segments) || segments.length === 0) {
+      return res.status(400).json({ error: "At least one segment is required for batch TTS." });
+    }
+
+    const normalizedSegments = segments
+      .map((segment: any) => ({
+        id: String(segment?.id ?? "").trim(),
+        text: String(segment?.text ?? "").trim(),
+      }))
+      .filter((segment: KokoroSegmentRequest) => segment.id && segment.text);
+
+    if (normalizedSegments.length === 0) {
+      return res.status(400).json({ error: "Each batch segment must include an id and text." });
+    }
+
+    const targetVoice = typeof voiceName === "string" && voiceName.trim() ? voiceName.trim() : DEFAULT_KOKORO_VOICE;
+    const targetSpeed = typeof speed === "number" && Number.isFinite(speed) ? speed : 1;
+    const results = await synthesizeWithKokoro(normalizedSegments, targetVoice, targetSpeed);
+
+    res.json({
+      audios: results,
+      engine: "hexgrad/kokoro",
+      voiceName: targetVoice,
+    });
+  } catch (err: any) {
+    console.error("Critical batch TTS endpoint crash:", err);
+    res.status(500).json({ error: err.message || "Error generating batch speech with Kokoro" });
   }
 });
 
@@ -306,6 +471,7 @@ Return the questions strictly as a JSON array matching this format:
 // Express static / Vite asset pipelines
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

@@ -5,9 +5,79 @@
 
 import React, { useState } from "react";
 import { UploadCloud, FileText, Plus, BookOpen, Clock, FileCheck, Trash2, ArrowRight, Sparkles, Cpu, Loader2, RefreshCw } from "lucide-react";
-import { Document } from "../types";
+import { AudioProfile, Document } from "../types";
 import { processRawText } from "../data/presets";
+import { DEFAULT_KOKORO_VOICE, preloadDocumentAudio } from "../lib/audioMap";
 import { motion } from "motion/react";
+
+type PdfTextItem = {
+  str: string;
+  transform: number[];
+  width?: number;
+  hasEOL?: boolean;
+};
+
+let pdfJsPromise: Promise<typeof import("pdfjs-dist/legacy/build/pdf.mjs")> | null = null;
+
+async function loadPdfJs() {
+  if (!pdfJsPromise) {
+    pdfJsPromise = import("pdfjs-dist/legacy/build/pdf.mjs").then((pdfjs) => {
+      if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+        pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).toString();
+      }
+      return pdfjs;
+    });
+  }
+
+  return pdfJsPromise;
+}
+
+function isPdfTextItem(item: unknown): item is PdfTextItem {
+  return Boolean(item && typeof item === "object" && "str" in item && typeof (item as PdfTextItem).str === "string" && Array.isArray((item as PdfTextItem).transform));
+}
+
+function extractPdfLines(items: unknown[]) {
+  const positionedItems = items
+    .filter(isPdfTextItem)
+    .map((item) => ({
+      text: item.str,
+      x: item.transform[4] ?? 0,
+      y: item.transform[5] ?? 0,
+      width: item.width ?? 0,
+    }))
+    .filter((item) => item.text.trim());
+
+  const lines: Array<{ y: number; parts: typeof positionedItems }> = [];
+
+  positionedItems
+    .sort((left, right) => (Math.abs(right.y - left.y) > 3 ? right.y - left.y : left.x - right.x))
+    .forEach((item) => {
+      const existingLine = lines.find((line) => Math.abs(line.y - item.y) < 3);
+      if (existingLine) {
+        existingLine.parts.push(item);
+        return;
+      }
+
+      lines.push({ y: item.y, parts: [item] });
+    });
+
+  return lines
+    .sort((left, right) => right.y - left.y)
+    .map((line) => {
+      const orderedParts = [...line.parts].sort((left, right) => left.x - right.x);
+      return orderedParts.reduce((accumulator, part, index) => {
+        if (index === 0) {
+          return part.text;
+        }
+
+        const previousPart = orderedParts[index - 1];
+        const previousRightEdge = previousPart.x + previousPart.width;
+        const needsSpace = part.x - previousRightEdge > 2 && !/^[,.;:!?)]/.test(part.text);
+        return `${accumulator}${needsSpace ? " " : ""}${part.text}`;
+      }, "").replace(/\s+/g, " ").trim();
+    })
+    .filter(Boolean);
+}
 
 interface Props {
   books: Document[];
@@ -15,9 +85,10 @@ interface Props {
   onUploadBook: (book: Document) => void;
   onRemoveBook: (id: string) => void;
   onUpdateStatus: (bookId: string, status: "unprocessed" | "processing" | "ready" | "failed") => void;
+  onUpdateAudioProfile: (bookId: string, audioProfile: AudioProfile | null) => void;
 }
 
-export default function LibraryView({ books, onSelectBook, onUploadBook, onRemoveBook, onUpdateStatus }: Props) {
+export default function LibraryView({ books, onSelectBook, onUploadBook, onRemoveBook, onUpdateStatus, onUpdateAudioProfile }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
   
@@ -30,46 +101,46 @@ export default function LibraryView({ books, onSelectBook, onUploadBook, onRemov
   // Core synthesis queue status trackers
   const [synthesisProgress, setSynthesisProgress] = useState<Record<string, { step: string; pct: number }>>({});
 
-  const handleTriggerSynthesis = (bookId: string) => {
+  const handleTriggerSynthesis = async (bookId: string) => {
+    const book = books.find((item) => item.id === bookId);
+    if (!book) {
+      return;
+    }
+
     onUpdateStatus(bookId, "processing");
     setSynthesisProgress(prev => ({
       ...prev,
-      [bookId]: { step: "Parsing and partitioning document paragraphs...", pct: 5 }
+      [bookId]: { step: "Preparing whole-book Kokoro narration cache...", pct: 2 }
     }));
 
-    // Step 1: Boundary & NLP alignment
-    setTimeout(() => {
-      setSynthesisProgress(prev => ({
-        ...prev,
-        [bookId]: { step: "Calibrating Kokoro neural phoneme anchors...", pct: 35 }
-      }));
-    }, 1200);
+    try {
+      const result = await preloadDocumentAudio({
+        document: book,
+        voiceId: DEFAULT_KOKORO_VOICE,
+        onProgress: ({ pct, step }) => {
+          setSynthesisProgress((prev) => ({
+            ...prev,
+            [bookId]: { step, pct },
+          }));
+        },
+      });
 
-    // Step 2: Speech synthesis cache construction
-    setTimeout(() => {
-      setSynthesisProgress(prev => ({
-        ...prev,
-        [bookId]: { step: "Pre-rendering 44.1kHz speech segment maps...", pct: 70 }
-      }));
-    }, 2400);
-
-    // Step 3: Synthesis completion verification
-    setTimeout(() => {
-      setSynthesisProgress(prev => ({
-        ...prev,
-        [bookId]: { step: "Vocal map synchronized. Kokoro pipeline online!", pct: 100 }
-      }));
-    }, 3600);
-
-    // Step 4: Toggle Document ready status
-    setTimeout(() => {
+      onUpdateAudioProfile(bookId, {
+        voiceId: result.voiceId,
+        generatedAt: new Date().toISOString(),
+        segmentCount: result.segmentCount,
+      });
       onUpdateStatus(bookId, "ready");
+    } catch (err: any) {
+      console.error("Whole-book Kokoro preload failed:", err);
+      onUpdateStatus(bookId, "failed");
+    } finally {
       setSynthesisProgress(prev => {
         const next = { ...prev };
         delete next[bookId];
         return next;
       });
-    }, 4500);
+    }
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -109,8 +180,6 @@ export default function LibraryView({ books, onSelectBook, onUploadBook, onRemov
         onUploadBook(newBook);
         setUploadProgress(null);
       } else if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
-        // High fidelity parser fallback for PDFs when read as text or parsed
-        // To keep it robust & extremely safe, read text strings or fallback to mock document structures with real content
         const text = await parsePDFFallback(file);
         const cleanTitle = file.name.replace(/\.[^/.]+$/, "");
         const newBook = processRawText(cleanTitle, "PDF Research Scan", text);
@@ -127,20 +196,38 @@ export default function LibraryView({ books, onSelectBook, onUploadBook, onRemov
     }
   };
 
-  // Safe client-side optical sentence extractor or text fallback
+  // Extract text directly from PDF pages in the browser. Image-only PDFs still need OCR and will fail honestly.
   const parsePDFFallback = async (file: File): Promise<string> => {
-    // Return mock text with real PDF content lines if PDF.js is unavailable, safe extraction
-    return `CHAPTER I. Executive Summary
+    const pdfjs = await loadPdfJs();
+    const loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(await file.arrayBuffer()),
+      useWorkerFetch: false,
+    });
 
-This academic PDF document "${file.name}" has been mapped successfully by the Document Intelligence Pipeline. Lumen parses the layout grid, segmenting text boxes and removing extraneous headers and page footers.
+    const pdf = await loadingTask.promise;
+    const pageTexts: string[] = [];
 
-Section 2. Background Review
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      setUploadProgress(`Extracting text from "${file.name}" (page ${pageNumber} of ${pdf.numPages})...`);
+      const page = await pdf.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      const lines = extractPdfLines(textContent.items as unknown[]);
+      if (lines.length > 0) {
+        pageTexts.push(lines.join("\n"));
+      }
+    }
 
-Our reading architecture splits paragraphs into stable sentence structures, providing micro-alignment timelines for text-to-speech rendering on any desktop or mobile device. Users can tap any individual word or sentence block to trigger instant narration or invoke the studio AI companion to compile chapter summaries.
+    const text = pageTexts
+      .join("\n\n")
+      .replace(/-\n(?=[a-z])/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
 
-Section 3. Methodology & Results
+    if (!text) {
+      throw new Error("This PDF does not contain readable text. If it is scanned images only, OCR is not implemented yet.");
+    }
 
-During performance tests of Kokoro and Gemini TTS models, visual text tracking yields zero jitter and absolute synchronization by syncing text highlight renders to current audio element trigger cursors. Time-to-first-audio latency remains below 400ms when requesting speech chunks paragraph-by-paragraph.`;
+    return text;
   };
 
   const handlePasteSubmit = (e: React.FormEvent) => {
@@ -188,6 +275,10 @@ During performance tests of Kokoro and Gemini TTS models, visual text tracking y
           ) : audioStatus === "processing" ? (
             <span className="px-1.5 py-0.5 rounded text-[8px] bg-teal-500/30 text-teal-200 border border-teal-400/30 font-medium animate-pulse">
               ⚙️ Synthesizing
+            </span>
+          ) : audioStatus === "failed" ? (
+            <span className="px-1.5 py-0.5 rounded text-[8px] bg-rose-500/20 text-rose-200 border border-rose-500/30 font-medium">
+              Retry Audio
             </span>
           ) : (
             <span className="px-1.5 py-0.5 rounded text-[8px] bg-green-500/20 text-green-200 border border-green-500/30 font-medium">
@@ -379,15 +470,19 @@ During performance tests of Kokoro and Gemini TTS models, visual text tracking y
                     </div>
 
                     {/* Audio Synthesis Panel */}
-                    {audioStatus === "unprocessed" && (
+                    {(audioStatus === "unprocessed" || audioStatus === "failed") && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           handleTriggerSynthesis(book.id);
                         }}
-                        className="w-full py-1.5 px-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-semibold text-[10px] rounded-lg transition-all flex items-center justify-center gap-1 shadow animate-pulse"
+                        className={`w-full py-1.5 px-2 text-white font-semibold text-[10px] rounded-lg transition-all flex items-center justify-center gap-1 shadow ${
+                          audioStatus === "failed"
+                            ? "bg-gradient-to-r from-rose-500 to-rose-600 hover:from-rose-600 hover:to-rose-700"
+                            : "bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 animate-pulse"
+                        }`}
                       >
-                        <Sparkles className="w-3 h-3 text-amber-200" /> Generate Audio Map
+                        <Sparkles className="w-3 h-3 text-amber-200" /> {audioStatus === "failed" ? "Retry Book Audio" : "Generate Book Audio"}
                       </button>
                     )}
 
@@ -398,9 +493,9 @@ During performance tests of Kokoro and Gemini TTS models, visual text tracking y
                           handleTriggerSynthesis(book.id);
                         }}
                         className="w-full py-1 px-2 border border-amber-500/30 hover:bg-amber-500/10 dark:hover:bg-amber-500/5 text-amber-600 dark:text-amber-400 font-semibold text-[9px] rounded-md transition-all flex items-center justify-center gap-1"
-                        title="Rephrase synthetic narrative bindings"
+                        title="Rebuild the whole-book Kokoro narration cache"
                       >
-                        <RefreshCw className="w-2.5 h-2.5 animate-spin-slow text-amber-500" /> Re-generate Audio
+                        <RefreshCw className="w-2.5 h-2.5 animate-spin-slow text-amber-500" /> Rebuild Book Audio
                       </button>
                     )}
 

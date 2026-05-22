@@ -26,8 +26,9 @@ import {
   Menu,
   Loader2,
 } from "lucide-react";
-import { Document, Paragraph, Sentence, Highlight, Bookmark, Voice } from "../types";
+import { AudioProfile, Document, Paragraph, Sentence, Highlight, Bookmark, Voice } from "../types";
 import { AccessibilityConfig } from "./AccessibilitySettings";
+import { ensureSentenceAudio, getDefaultVoiceId, getNarratableSentenceText, preloadDocumentAudio } from "../lib/audioMap";
 
 interface Props {
   document: Document;
@@ -37,6 +38,7 @@ interface Props {
   onBack: () => void;
   onUpdateProgress: (paragraphIndex: number, sentenceIndex: number) => void;
   onAddHighlight: (highlight: Omit<Highlight, "id" | "createdAt">) => void;
+  onRemoveHighlight: (highlightId: string) => void;
   onAddBookmark: (bookmark: Omit<Bookmark, "id" | "createdAt">) => void;
   activeParagraphIndex: number;
   activeSentenceIndex: number;
@@ -45,6 +47,7 @@ interface Props {
   toggleRightSidebar: () => void;
   showRightSidebar: boolean;
   onUpdateStatus: (bookId: string, status: "unprocessed" | "processing" | "ready" | "failed") => void;
+  onUpdateAudioProfile: (bookId: string, audioProfile: AudioProfile | null) => void;
 }
 
 const VOICES: Voice[] = [
@@ -63,6 +66,7 @@ export default function ReaderView({
   onBack,
   onUpdateProgress,
   onAddHighlight,
+  onRemoveHighlight,
   onAddBookmark,
   activeParagraphIndex,
   activeSentenceIndex,
@@ -71,7 +75,47 @@ export default function ReaderView({
   toggleRightSidebar,
   showRightSidebar,
   onUpdateStatus,
+  onUpdateAudioProfile,
 }: Props) {
+  const compareCursors = (
+    a: { paragraphIndex: number; sentenceIndex: number },
+    b: { paragraphIndex: number; sentenceIndex: number },
+  ) => {
+    if (a.paragraphIndex !== b.paragraphIndex) {
+      return a.paragraphIndex - b.paragraphIndex;
+    }
+
+    return a.sentenceIndex - b.sentenceIndex;
+  };
+
+  const getHighlightRange = (highlight: Highlight) => {
+    const start = {
+      paragraphIndex: highlight.paragraphIndex,
+      sentenceIndex: highlight.sentenceIndex,
+    };
+    const end = {
+      paragraphIndex: highlight.endParagraphIndex ?? highlight.paragraphIndex,
+      sentenceIndex: highlight.endSentenceIndex ?? highlight.sentenceIndex,
+    };
+
+    return compareCursors(start, end) <= 0 ? { start, end } : { start: end, end: start };
+  };
+
+  const isCursorWithinRange = (
+    cursor: { paragraphIndex: number; sentenceIndex: number },
+    start: { paragraphIndex: number; sentenceIndex: number },
+    end: { paragraphIndex: number; sentenceIndex: number },
+  ) => compareCursors(cursor, start) >= 0 && compareCursors(cursor, end) <= 0;
+
+  const doesHighlightOverlapSelection = (
+    highlight: Highlight,
+    start: { paragraphIndex: number; sentenceIndex: number },
+    end: { paragraphIndex: number; sentenceIndex: number },
+  ) => {
+    const range = getHighlightRange(highlight);
+    return compareCursors(range.start, end) <= 0 && compareCursors(range.end, start) >= 0;
+  };
+
   // Navigation & Table of Contents Sidebar
   const [showTOC, setShowTOC] = useState(false);
 
@@ -80,38 +124,48 @@ export default function ReaderView({
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioLoading, setAudioLoading] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1.0);
-  const [selectedVoice, setSelectedVoice] = useState<string>("af_sarah");
+  const [selectedVoice, setSelectedVoice] = useState<string>(() => getDefaultVoiceId(document));
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // Local Reader compilers tracking
   const [localPct, setLocalPct] = useState(0);
   const [localStep, setLocalStep] = useState("");
 
-  const handleTriggerReaderSynthesis = () => {
+  const isSelectedVoiceReady = document.processingStatus === "ready" && document.audioProfile?.voiceId === selectedVoice;
+  const selectedVoiceLabel = VOICES.find((voice) => voice.id === selectedVoice)?.name || selectedVoice;
+  const generatedVoiceLabel = document.audioProfile?.voiceId
+    ? VOICES.find((voice) => voice.id === document.audioProfile?.voiceId)?.name || document.audioProfile.voiceId
+    : null;
+
+  const handleTriggerReaderSynthesis = async () => {
     onUpdateStatus(document.id, "processing");
-    setLocalPct(5);
-    setLocalStep("Parsing and partitioning document paragraphs into tokens...");
+    setLocalPct(2);
+    setLocalStep("Preparing whole-book Kokoro narration cache...");
 
-    setTimeout(() => {
-      setLocalPct(35);
-      setLocalStep("Calibrating Kokoro neural phoneme anchors and pitch...");
-    }, 1200);
+    try {
+      const result = await preloadDocumentAudio({
+        document,
+        voiceId: selectedVoice,
+        onProgress: ({ pct, step }) => {
+          setLocalPct(pct);
+          setLocalStep(step);
+        },
+      });
 
-    setTimeout(() => {
-      setLocalPct(70);
-      setLocalStep("Pre-rendering audio buffers for high-speed local stream cache...");
-    }, 2400);
-
-    setTimeout(() => {
-      setLocalPct(100);
-      setLocalStep("Vocal map compiled. Playback system online!");
-    }, 3600);
-
-    setTimeout(() => {
+      onUpdateAudioProfile(document.id, {
+        voiceId: result.voiceId,
+        generatedAt: new Date().toISOString(),
+        segmentCount: result.segmentCount,
+      });
       onUpdateStatus(document.id, "ready");
+      setLocalPct(100);
+      setLocalStep("Whole-book Kokoro audio is ready.");
+    } catch (err: any) {
+      console.error("Reader Kokoro preload failed:", err);
+      onUpdateStatus(document.id, "failed");
       setLocalPct(0);
-      setLocalStep("");
-    }, 4500);
+      setLocalStep(err.message || "Kokoro audio generation failed.");
+    }
   };
 
   // Floating word selection toolbar popup state
@@ -119,8 +173,10 @@ export default function ReaderView({
     text: string;
     clientX: number;
     clientY: number;
-    paragraphIndex: number;
-    sentenceIndex: number;
+    startParagraphIndex: number;
+    startSentenceIndex: number;
+    endParagraphIndex: number;
+    endSentenceIndex: number;
   } | null>(null);
 
   const [highlightColor, setHighlightColor] = useState("bg-teal-500/25 border-l-2 border-teal-500");
@@ -133,7 +189,11 @@ export default function ReaderView({
 
   // Prefetching queues for seamless gaps
   const prefetchTimeoutRef = useRef<any>(null);
-  const audioCacheRef = useRef<Record<string, string>>({}); // cache key word/sentence string -> audio resource URLs
+  const audioCacheRef = useRef<Record<string, string>>({});
+
+  useEffect(() => {
+    setSelectedVoice(getDefaultVoiceId(document));
+  }, [document.id, document.audioProfile?.voiceId]);
 
   // Watch sentence cursor changes to automatically track reading line / trigger active speak audio
   useEffect(() => {
@@ -164,52 +224,142 @@ export default function ReaderView({
     }
   }, [playbackRate, audioUrl]);
 
+  useEffect(() => {
+    if (!isSelectedVoiceReady && isPlaying) {
+      setIsPlaying(false);
+    }
+  }, [isSelectedVoiceReady, isPlaying]);
+
+  const selectedHighlightIds = toolbarSelection
+    ? highlights
+        .filter((highlight) =>
+          doesHighlightOverlapSelection(
+            highlight,
+            {
+              paragraphIndex: toolbarSelection.startParagraphIndex,
+              sentenceIndex: toolbarSelection.startSentenceIndex,
+            },
+            {
+              paragraphIndex: toolbarSelection.endParagraphIndex,
+              sentenceIndex: toolbarSelection.endSentenceIndex,
+            },
+          ),
+        )
+        .map((highlight) => highlight.id)
+    : [];
+
+  const findNarratableCursor = (
+    paragraphIndex: number,
+    sentenceIndex: number,
+    {
+      direction = 1,
+      includeCurrent = false,
+    }: {
+      direction?: 1 | -1;
+      includeCurrent?: boolean;
+    } = {},
+  ) => {
+    let nextParagraphIndex = paragraphIndex;
+    let nextSentenceIndex = includeCurrent ? sentenceIndex : sentenceIndex + direction;
+
+    while (nextParagraphIndex >= 0 && nextParagraphIndex < document.paragraphs.length) {
+      const currentParagraph = document.paragraphs[nextParagraphIndex];
+      if (!currentParagraph) {
+        return null;
+      }
+
+      while (nextSentenceIndex >= 0 && nextSentenceIndex < currentParagraph.sentences.length) {
+        const sentence = currentParagraph.sentences[nextSentenceIndex];
+        if (sentence && getNarratableSentenceText(sentence.text)) {
+          return {
+            paragraphIndex: nextParagraphIndex,
+            sentenceIndex: nextSentenceIndex,
+          };
+        }
+        nextSentenceIndex += direction;
+      }
+
+      nextParagraphIndex += direction;
+      if (nextParagraphIndex < 0 || nextParagraphIndex >= document.paragraphs.length) {
+        break;
+      }
+
+      const nextParagraph = document.paragraphs[nextParagraphIndex];
+      nextSentenceIndex = direction > 0 ? 0 : Math.max(nextParagraph.sentences.length - 1, 0);
+    }
+
+    return null;
+  };
+
+  const getUpcomingSentenceCursors = (paragraphIndex: number, sentenceIndex: number, lookahead: number = 2) => {
+    const upcoming: Array<{ paragraphIndex: number; sentenceIndex: number }> = [];
+    let cursor = { paragraphIndex, sentenceIndex };
+
+    while (upcoming.length < lookahead) {
+      const nextCursor = findNarratableCursor(cursor.paragraphIndex, cursor.sentenceIndex, {
+        direction: 1,
+      });
+      if (!nextCursor) {
+        break;
+      }
+
+      upcoming.push(nextCursor);
+      cursor = nextCursor;
+    }
+
+    return upcoming;
+  };
+
   const loadAndPlaySentenceAudio = async (pIdx: number, sIdx: number) => {
     stopAudio();
     setAudioLoading(true);
 
-    const sentence = document.paragraphs[pIdx]?.sentences[sIdx];
+    if (!isSelectedVoiceReady) {
+      setAudioLoading(false);
+      setIsPlaying(false);
+      return;
+    }
+
+    const targetCursor = findNarratableCursor(pIdx, sIdx, { includeCurrent: true });
+    if (!targetCursor) {
+      setIsPlaying(false);
+      setAudioLoading(false);
+      return;
+    }
+
+    if (targetCursor.paragraphIndex !== pIdx || targetCursor.sentenceIndex !== sIdx) {
+      onJumpTo(targetCursor.paragraphIndex, targetCursor.sentenceIndex);
+      onUpdateProgress(targetCursor.paragraphIndex, targetCursor.sentenceIndex);
+      setAudioLoading(false);
+      return;
+    }
+
+    const sentence = document.paragraphs[targetCursor.paragraphIndex]?.sentences[targetCursor.sentenceIndex];
     if (!sentence) {
       setIsPlaying(false);
       setAudioLoading(false);
       return;
     }
 
-    const textToSpeak = sentence.text;
-    const cacheKey = `${selectedVoice}_${textToSpeak}`;
+    const cacheKey = `${document.id}_${selectedVoice}_${targetCursor.paragraphIndex}_${targetCursor.sentenceIndex}`;
 
     try {
       let resolvedUrl = audioCacheRef.current[cacheKey];
 
       if (!resolvedUrl) {
-        // Fetch TTS audio binary chunk from our proxy Express API route!
-        const response = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: textToSpeak,
-            voiceName: selectedVoice,
-          }),
+        resolvedUrl = await ensureSentenceAudio({
+          document,
+          voiceId: selectedVoice,
+          paragraphIndex: targetCursor.paragraphIndex,
+          sentenceIndex: targetCursor.sentenceIndex,
         });
-
-        const data = await response.json();
-        if (data.error) throw new Error(data.error);
-
-        if (data.audio.startsWith("data:audio/")) {
-          resolvedUrl = data.audio;
-        } else if (data.audio.startsWith("UklGR")) {
-          resolvedUrl = `data:audio/wav;base64,${data.audio}`;
-        } else {
-          resolvedUrl = pcmToWavBlob(data.audio, 24000);
-        }
-        // Cache resources to prevent duplicate server queries
         audioCacheRef.current[cacheKey] = resolvedUrl;
       }
 
-      // Preload next sentence for perfect narration transitions in background
-      triggerNarrationPrefetch(pIdx, sIdx);
+      triggerNarrationPrefetch(targetCursor.paragraphIndex, targetCursor.sentenceIndex);
 
       const audio = new Audio(resolvedUrl);
+      audio.preload = "auto";
       audio.addEventListener("canplay", () => {
         audio.playbackRate = playbackRate;
       });
@@ -222,146 +372,55 @@ export default function ReaderView({
       setAudioLoading(false);
 
       audio.onended = () => {
-        handleSentenceCompleted(pIdx, sIdx);
+        handleSentenceCompleted(targetCursor.paragraphIndex, targetCursor.sentenceIndex);
       };
 
       await audio.play();
     } catch (err: any) {
-      console.warn("Server TTS generation rate-limited or unavailable; falling back to high-fidelity native browser SpeechSynthesis API:", err);
+      console.error("Kokoro narration playback failed:", err);
       setAudioLoading(false);
-      speakWithWebSpeech(textToSpeak, pIdx, sIdx);
-    }
-  };
-
-  const speakWithWebSpeech = (text: string, pIdx: number, sIdx: number) => {
-    if (typeof window === "undefined" || !window.speechSynthesis) {
       setIsPlaying(false);
-      return;
+      alert("Kokoro audio could not be loaded. Rebuild the book audio and verify the local Kokoro worker is available.");
     }
-
-    // Cancel any active SpeechSynthesis before starting
-    window.speechSynthesis.cancel();
-
-    // Small delay ensures previous cancellation is registered by the browser speech scheduler
-    setTimeout(() => {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = playbackRate * 0.95; // Slightly scale speed to map neural patterns
-
-      // Target matching native voices based on active selection (accent, gender, naming)
-      const voices = window.speechSynthesis.getVoices();
-      let bestVoice = null;
-
-      const isFemale = selectedVoice.includes("sarah") || selectedVoice.includes("bella") || selectedVoice.includes("emma");
-      const isUK = selectedVoice.includes("emma") || selectedVoice.includes("lewis");
-
-      for (const voice of voices) {
-        const langLower = voice.lang.toLowerCase();
-        const nameLower = voice.name.toLowerCase();
-
-        if (langLower.startsWith("en")) {
-          // If we want British English Accent
-          if (isUK && (langLower.includes("gb") || langLower.includes("uk") || nameLower.includes("british") || nameLower.includes("english gb"))) {
-            if (isFemale && (nameLower.includes("female") || nameLower.includes("zira") || nameLower.includes("hazel") || nameLower.includes("samantha") || nameLower.includes("susan") || nameLower.includes("google") || nameLower.includes("natural"))) {
-              bestVoice = voice;
-              break;
-            } else if (!isFemale && (nameLower.includes("male") || nameLower.includes("david") || nameLower.includes("george") || nameLower.includes("hazel") === false)) {
-              bestVoice = voice;
-              break;
-            }
-          } 
-          // If we want American English Accent
-          else if (!isUK && (langLower.includes("us") || langLower.includes("united states") || nameLower.includes("america") || nameLower.includes("english us"))) {
-            if (isFemale && (nameLower.includes("female") || nameLower.includes("zira") || nameLower.includes("samantha") || nameLower.includes("susan") || nameLower.includes("google") || nameLower.includes("natural"))) {
-              bestVoice = voice;
-              break;
-            } else if (!isFemale && (nameLower.includes("male") || nameLower.includes("david") || nameLower.includes("mark") || nameLower.includes("microsoft"))) {
-              bestVoice = voice;
-              break;
-            }
-          }
-        }
-      }
-
-      // Fallback: any standard English voice
-      if (!bestVoice) {
-        bestVoice = voices.find(v => v.lang.toLowerCase().startsWith("en")) || null;
-      }
-
-      if (bestVoice) {
-        utterance.voice = bestVoice;
-      }
-
-      utterance.onend = () => {
-        handleSentenceCompleted(pIdx, sIdx);
-      };
-
-      utterance.onerror = (ev) => {
-        if (ev.error !== "interrupted") {
-          console.error("SpeechSynthesisUtterance execution failure:", ev);
-          setIsPlaying(false);
-        }
-      };
-
-      window.speechSynthesis.speak(utterance);
-    }, 60);
   };
 
   const triggerNarrationPrefetch = (pIdx: number, sIdx: number) => {
     if (prefetchTimeoutRef.current) clearTimeout(prefetchTimeoutRef.current);
 
     prefetchTimeoutRef.current = setTimeout(async () => {
-      let nextP = pIdx;
-      let nextS = sIdx + 1;
+      const upcoming = getUpcomingSentenceCursors(pIdx, sIdx, 2);
 
-      if (nextS >= (document.paragraphs[pIdx]?.sentences.length || 0)) {
-        nextP = pIdx + 1;
-        nextS = 0;
-      }
-
-      const nextSentence = document.paragraphs[nextP]?.sentences[nextS];
-      if (!nextSentence) return;
-
-      const cacheKey = `${selectedVoice}_${nextSentence.text}`;
-      if (audioCacheRef.current[cacheKey]) return; // Already cached
-
-      try {
-        const response = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: nextSentence.text,
-            voiceName: selectedVoice,
-          }),
-        });
-
-        const data = await response.json();
-        if (data && data.audio) {
-          let url;
-          if (data.audio.startsWith("data:audio/")) {
-            url = data.audio;
-          } else if (data.audio.startsWith("UklGR")) {
-            url = `data:audio/wav;base64,${data.audio}`;
-          } else {
-            url = pcmToWavBlob(data.audio, 24000);
-          }
-          audioCacheRef.current[cacheKey] = url;
+      for (const cursor of upcoming) {
+        const cacheKey = `${document.id}_${selectedVoice}_${cursor.paragraphIndex}_${cursor.sentenceIndex}`;
+        if (audioCacheRef.current[cacheKey]) {
+          continue;
         }
-      } catch (err) {
-        console.warn("Background audio prefetch silent drop:", err);
+
+        try {
+          const url = await ensureSentenceAudio({
+            document,
+            voiceId: selectedVoice,
+            paragraphIndex: cursor.paragraphIndex,
+            sentenceIndex: cursor.sentenceIndex,
+          });
+          audioCacheRef.current[cacheKey] = url;
+        } catch (err) {
+          console.warn("Background Kokoro prefetch silent drop:", err);
+          break;
+        }
       }
-    }, 1500); // Trigger prefetch 1.5 seconds after current playing start
+    }, 250);
   };
 
   // Skip sentence completion
   const handleSentenceCompleted = (pIdx: number, sIdx: number) => {
-    const totalSentences = document.paragraphs[pIdx]?.sentences.length || 0;
-    if (sIdx + 1 < totalSentences) {
-      onJumpTo(pIdx, sIdx + 1);
-    } else if (pIdx + 1 < document.paragraphs.length) {
-      onJumpTo(pIdx + 1, 0);
-    } else {
-      setIsPlaying(false); // Book finished!
+    const nextCursor = findNarratableCursor(pIdx, sIdx, { direction: 1 });
+    if (nextCursor) {
+      onJumpTo(nextCursor.paragraphIndex, nextCursor.sentenceIndex);
+      return;
     }
+
+    setIsPlaying(false); // Book finished!
   };
 
   const stopAudio = () => {
@@ -369,31 +428,22 @@ export default function ReaderView({
       audioRef.current.pause();
       audioRef.current = null;
     }
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
     setAudioUrl(null);
   };
 
   // Sentence Skip Back
   const handleSkipBack = () => {
-    const totalSentences = document.paragraphs[activeParagraphIndex]?.sentences.length || 0;
-    if (activeSentenceIndex - 1 >= 0) {
-      onJumpTo(activeParagraphIndex, activeSentenceIndex - 1);
-    } else if (activeParagraphIndex - 1 >= 0) {
-      const prevPIdx = activeParagraphIndex - 1;
-      const prevSentencesCount = document.paragraphs[prevPIdx]?.sentences.length || 0;
-      onJumpTo(prevPIdx, Math.max(0, prevSentencesCount - 1));
+    const previousCursor = findNarratableCursor(activeParagraphIndex, activeSentenceIndex, { direction: -1 });
+    if (previousCursor) {
+      onJumpTo(previousCursor.paragraphIndex, previousCursor.sentenceIndex);
     }
   };
 
   // Sentence Skip Forward
   const handleSkipForward = () => {
-    const totalSentences = document.paragraphs[activeParagraphIndex]?.sentences.length || 0;
-    if (activeSentenceIndex + 1 < totalSentences) {
-      onJumpTo(activeParagraphIndex, activeSentenceIndex + 1);
-    } else if (activeParagraphIndex + 1 < document.paragraphs.length) {
-      onJumpTo(activeParagraphIndex + 1, 0);
+    const nextCursor = findNarratableCursor(activeParagraphIndex, activeSentenceIndex, { direction: 1 });
+    if (nextCursor) {
+      onJumpTo(nextCursor.paragraphIndex, nextCursor.sentenceIndex);
     }
   };
 
@@ -422,42 +472,41 @@ export default function ReaderView({
           if (containerRect) {
             const relativeLeft = rect.left - containerRect.left + rect.width / 2;
             const relativeTop = rect.top - containerRect.top + readerColumnRef.current.scrollTop;
-            
-            let pIdx = activeParagraphIndex;
-            let sIdx = activeSentenceIndex;
-            
-            const findIndices = (valNode: Node | null): {p: number, s: number} | null => {
-              let curr = valNode;
-              while (curr && curr !== window.document.body) {
-                if (curr instanceof HTMLElement) {
-                  const pAttr = curr.getAttribute("data-paragraph-index");
-                  const sAttr = curr.getAttribute("data-sentence-index");
-                  if (pAttr !== null && sAttr !== null) {
-                    return { p: parseInt(pAttr), s: parseInt(sAttr) };
-                  }
+
+            const sentenceElements = Array.from(
+              readerColumnRef.current.querySelectorAll("[data-paragraph-index][data-sentence-index]"),
+            ) as HTMLElement[];
+
+            const selectedCursors = sentenceElements
+              .filter((element) => {
+                try {
+                  return range.intersectsNode(element);
+                } catch {
+                  return sel.containsNode(element, true);
                 }
-                curr = curr.parentNode;
-              }
-              return null;
-            };
+              })
+              .map((element) => ({
+                paragraphIndex: parseInt(element.getAttribute("data-paragraph-index") || "0", 10),
+                sentenceIndex: parseInt(element.getAttribute("data-sentence-index") || "0", 10),
+              }))
+              .sort(compareCursors);
 
-            const startIndices = findIndices(range.startContainer);
-            const endIndices = findIndices(range.endContainer);
-            const anchorIndices = findIndices(sel.anchorNode);
-            const focusIndices = findIndices(sel.focusNode);
-
-            const found = startIndices || endIndices || anchorIndices || focusIndices;
-            if (found) {
-              pIdx = found.p;
-              sIdx = found.s;
+            if (selectedCursors.length === 0) {
+              setToolbarSelection(null);
+              return;
             }
+
+            const firstCursor = selectedCursors[0];
+            const lastCursor = selectedCursors[selectedCursors.length - 1];
 
             setToolbarSelection({
               text: selectedText,
               clientX: relativeLeft,
               clientY: relativeTop,
-              paragraphIndex: pIdx,
-              sentenceIndex: sIdx,
+              startParagraphIndex: firstCursor.paragraphIndex,
+              startSentenceIndex: firstCursor.sentenceIndex,
+              endParagraphIndex: lastCursor.paragraphIndex,
+              endSentenceIndex: lastCursor.sentenceIndex,
             });
           }
         }
@@ -567,12 +616,20 @@ export default function ReaderView({
     }
   };
 
+  const hasActiveTextSelection = () => {
+    const selection = window.getSelection();
+    return Boolean(selection && selection.toString().trim().length > 0);
+  };
+
   const handleColorHighlightSelect = (colorClass: string) => {
     if (!toolbarSelection) return;
+    selectedHighlightIds.forEach((highlightId) => onRemoveHighlight(highlightId));
     onAddHighlight({
       documentId: document.id,
-      paragraphIndex: toolbarSelection.paragraphIndex,
-      sentenceIndex: toolbarSelection.sentenceIndex,
+      paragraphIndex: toolbarSelection.startParagraphIndex,
+      sentenceIndex: toolbarSelection.startSentenceIndex,
+      endParagraphIndex: toolbarSelection.endParagraphIndex,
+      endSentenceIndex: toolbarSelection.endSentenceIndex,
       text: toolbarSelection.text,
       color: colorClass,
       note: noteInput.trim() || undefined,
@@ -582,20 +639,59 @@ export default function ReaderView({
     setAddingNote(false);
   };
 
+  const handleRemoveSelectedHighlights = () => {
+    if (selectedHighlightIds.length === 0) {
+      return;
+    }
+
+    selectedHighlightIds.forEach((highlightId) => onRemoveHighlight(highlightId));
+    setToolbarSelection(null);
+    setNoteInput("");
+    setAddingNote(false);
+  };
+
   // Handle Double-tap / Click text trigger play
   const handleSentenceClick = (pIdx: number, sIdx: number) => {
+    if (hasActiveTextSelection()) {
+      return;
+    }
+
+    const sentence = document.paragraphs[pIdx]?.sentences[sIdx];
+    if (!sentence || !getNarratableSentenceText(sentence.text)) {
+      handleParagraphClick(pIdx);
+      return;
+    }
+
     onJumpTo(pIdx, sIdx);
     onUpdateProgress(pIdx, sIdx);
+    setToolbarSelection(null);
+  };
+
+  const handleParagraphClick = (pIdx: number) => {
+    if (hasActiveTextSelection()) {
+      return;
+    }
+
+    const firstSentence = document.paragraphs[pIdx]?.sentences.find((sentence) => getNarratableSentenceText(sentence.text));
+    if (!firstSentence) {
+      return;
+    }
+
+    onJumpTo(pIdx, firstSentence.index);
+    onUpdateProgress(pIdx, firstSentence.index);
     setToolbarSelection(null);
   };
 
   // Place highlight
   const executeHighlight = () => {
     if (!toolbarSelection) return;
+    selectedHighlightIds.forEach((highlightId) => onRemoveHighlight(highlightId));
     onAddHighlight({
       documentId: document.id,
-      paragraphIndex: toolbarSelection.paragraphIndex,
-      sentenceIndex: toolbarSelection.sentenceIndex,
+      paragraphIndex: toolbarSelection.startParagraphIndex,
+      sentenceIndex: toolbarSelection.startSentenceIndex,
+      endParagraphIndex: toolbarSelection.endParagraphIndex,
+      endSentenceIndex: toolbarSelection.endSentenceIndex,
       text: toolbarSelection.text,
       color: highlightColor,
       note: noteInput.trim() || undefined,
@@ -659,7 +755,12 @@ export default function ReaderView({
   const renderSentenceWithFormat = (s: Sentence, isFocused: boolean, pIdx: number) => {
     const sentenceText = s.text;
     const isHighlighted = highlights.find(
-      (h) => h.paragraphIndex === pIdx && h.sentenceIndex === s.index
+      (highlight) =>
+        isCursorWithinRange(
+          { paragraphIndex: pIdx, sentenceIndex: s.index },
+          getHighlightRange(highlight).start,
+          getHighlightRange(highlight).end,
+        )
     );
 
     const bionicWords = sentenceText.split(" ").map((w, idx) => parseBionicWord(w, idx));
@@ -670,7 +771,10 @@ export default function ReaderView({
         key={s.id}
         data-paragraph-index={pIdx}
         data-sentence-index={s.index}
-        onClick={() => handleSentenceClick(pIdx, s.index)}
+        onClick={(event) => {
+          event.stopPropagation();
+          handleSentenceClick(pIdx, s.index);
+        }}
         className={`relative inline mx-0.5 px-0.5 rounded cursor-pointer leading-relaxed tracking-wide transition-all select-text duration-200 ${
           isHighlighted
             ? isHighlighted.color
@@ -778,8 +882,12 @@ export default function ReaderView({
                   <button
                     key={ch.id}
                     onClick={() => {
-                      onJumpTo(ch.paragraphIndex, 0);
-                      onUpdateProgress(ch.paragraphIndex, 0);
+                      const chapterCursor = findNarratableCursor(ch.paragraphIndex, 0, { includeCurrent: true }) || {
+                        paragraphIndex: ch.paragraphIndex,
+                        sentenceIndex: 0,
+                      };
+                      onJumpTo(chapterCursor.paragraphIndex, chapterCursor.sentenceIndex);
+                      onUpdateProgress(chapterCursor.paragraphIndex, chapterCursor.sentenceIndex);
                       setShowTOC(false);
                     }}
                     className={`w-full text-left py-2 px-2.5 rounded text-xs transition-all ${
@@ -817,36 +925,49 @@ export default function ReaderView({
           )}
 
           {/* Audio Synthesis Locked/Unlocking Dashboard Card */}
-          {document.processingStatus !== "ready" && (
+          {!isSelectedVoiceReady && (
             <div className="w-full max-w-[65ch] mb-8 p-5 rounded-2xl border bg-white dark:bg-zinc-950 shadow-sm border-amber-200/50 dark:border-amber-900/40 text-left space-y-3.5 relative z-10">
               <div className="flex items-center gap-2">
                 <span className="p-1 px-2 rounded text-[9px] uppercase tracking-wider font-bold bg-amber-500/15 text-amber-600 dark:text-amber-400 font-mono">
                   🎙️ Audio Offline
                 </span>
                 <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">
-                  Speech narration is not synthesized yet
+                  Speech narration is not preloaded for this voice yet
                 </span>
               </div>
               <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
-                Lumen segments text strings and constructs timing indexes in a playable audio mapping. Generate your audio map to activate the bidirectional Speak narration and learning companion.
+                {generatedVoiceLabel && document.audioProfile?.voiceId !== selectedVoice
+                  ? `This book is currently preloaded for ${generatedVoiceLabel}. Generate again to switch the whole-book cache to ${selectedVoiceLabel}.`
+                  : "Generate the full Kokoro audio map once, then you can jump to any paragraph and start playback from there without waiting on live synthesis."}
               </p>
-              {document.processingStatus === "unprocessed" ? (
-                <button
-                  onClick={() => handleTriggerReaderSynthesis()}
-                  className="py-2.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 active:scale-97 text-white font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 shadow animate-pulse cursor-pointer"
-                >
-                  <Sparkles className="w-4 h-4 text-amber-203" />
-                  Load High-Fidelity Voice Synthesis Engine
-                </button>
-              ) : (
+              {document.processingStatus === "processing" ? (
                 <div className="p-3.5 bg-teal-50 dark:bg-teal-950/25 rounded-xl text-teal-700 dark:text-teal-400 border border-teal-200/50 dark:border-teal-900/30 space-y-1.5">
                   <div className="flex items-center gap-2 animate-pulse font-bold text-xs">
                     <Loader2 className="w-4 h-4 animate-spin text-teal-600 dark:text-teal-400" />
-                    <span>{localPct}% Complete - Synthesizing Kokoro speech blocks...</span>
+                    <span>{localPct}% Complete - Preloading Kokoro speech blocks...</span>
                   </div>
                   <p className="text-[10px] opacity-80 leading-snug font-mono">
                     {localStep || "Allocating synthesis partitions..."}
                   </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {document.processingStatus === "failed" && localStep ? (
+                    <p className="text-xs text-rose-600 dark:text-rose-400 leading-relaxed">
+                      {localStep}
+                    </p>
+                  ) : null}
+                  <button
+                    onClick={() => handleTriggerReaderSynthesis()}
+                    className="py-2.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 active:scale-97 text-white font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 shadow animate-pulse cursor-pointer"
+                  >
+                    <Sparkles className="w-4 h-4 text-amber-203" />
+                    {generatedVoiceLabel && document.audioProfile?.voiceId !== selectedVoice
+                      ? "Generate Selected Voice Audio"
+                      : document.processingStatus === "failed"
+                      ? "Retry Whole-Book Kokoro Audio"
+                      : "Generate Whole-Book Kokoro Audio"}
+                  </button>
                 </div>
               )}
             </div>
@@ -869,11 +990,16 @@ export default function ReaderView({
                 const codeLang = p.text.match(/^```([a-zA-Z0-9]*)/)?.[1] || "";
                 
                 return (
-                  <div key={p.id} className="w-full bg-zinc-900 border border-zinc-800 dark:border-white/5 rounded-xl p-4 my-6 font-mono text-[13px] leading-relaxed shadow-inner overflow-x-auto relative group/code text-zinc-100">
+                  <div
+                    key={p.id}
+                    onClick={() => handleParagraphClick(pIdx)}
+                    className="w-full bg-zinc-900 border border-zinc-800 dark:border-white/5 rounded-xl p-4 my-6 font-mono text-[13px] leading-relaxed shadow-inner overflow-x-auto relative group/code text-zinc-100 cursor-pointer"
+                  >
                     <div className="absolute top-2 right-2 flex gap-1.5 items-center select-none opacity-0 group-hover/code:opacity-100 transition-opacity">
                       <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{codeLang || "code"}</span>
                       <button 
-                        onClick={() => {
+                        onClick={(event) => {
+                          event.stopPropagation();
                           const codeBody = p.sentences.map(s => s.text).join("\n");
                           navigator.clipboard.writeText(codeBody);
                         }}
@@ -911,7 +1037,7 @@ export default function ReaderView({
                 }
 
                 return (
-                  <div key={p.id} className={headingClasses}>
+                  <div key={p.id} className={`${headingClasses} cursor-pointer`} onClick={() => handleParagraphClick(pIdx)}>
                     {p.sentences.map((s) => {
                       const isFocused = isCurrentParagraph && s.index === activeSentenceIndex;
                       // Strip visual hash characters on the fly inside heading
@@ -933,7 +1059,7 @@ export default function ReaderView({
                 const marker = isBullet ? "•" : p.text.match(/^\d+\./)?.[0] || "1.";
                 
                 return (
-                  <div key={p.id} className="flex gap-3 pl-4 items-start select-text leading-relaxed py-0.5">
+                  <div key={p.id} className="flex gap-3 pl-4 items-start select-text leading-relaxed py-0.5 cursor-pointer" onClick={() => handleParagraphClick(pIdx)}>
                     <span className="text-teal-600 dark:text-teal-400 font-bold select-none mt-1 text-sm shrink-0">
                       {marker}
                     </span>
@@ -955,7 +1081,7 @@ export default function ReaderView({
               const isBlockquote = p.text.startsWith("> ");
               if (isBlockquote) {
                 return (
-                  <blockquote key={p.id} className="border-l-4 border-teal-500/50 dark:border-teal-400/40 pl-4 py-1.5 my-4 italic text-gray-600 dark:text-zinc-400 select-text max-w-[65ch] w-full">
+                  <blockquote key={p.id} className="border-l-4 border-teal-500/50 dark:border-teal-400/40 pl-4 py-1.5 my-4 italic text-gray-600 dark:text-zinc-400 select-text max-w-[65ch] w-full cursor-pointer" onClick={() => handleParagraphClick(pIdx)}>
                     {p.sentences.map((s) => {
                       const isFocused = isCurrentParagraph && s.index === activeSentenceIndex;
                       const blockquoteSentence = {
@@ -970,7 +1096,7 @@ export default function ReaderView({
 
               // 5. Regular core paragraphs
               return (
-                <p key={p.id} className="leading-relaxed text-gray-800 dark:text-gray-250 select-text">
+                <p key={p.id} className="leading-relaxed text-gray-800 dark:text-gray-250 select-text cursor-pointer" onClick={() => handleParagraphClick(pIdx)}>
                   {p.sentences.map((s) => {
                     const isFocused = isCurrentParagraph && s.index === activeSentenceIndex;
                     return renderSentenceWithFormat(s, isFocused, pIdx);
@@ -984,6 +1110,9 @@ export default function ReaderView({
           {toolbarSelection && (
             <div
               className="selection-popup absolute bg-white dark:bg-zinc-900 border border-gray-200 dark:border-white/10 rounded-xl p-3 shadow-xl z-50 flex flex-col gap-2.5 w-[210px] animate-fade-in"
+              onMouseDown={(event) => {
+                event.preventDefault();
+              }}
               style={{
                 left: `${toolbarSelection.clientX - 105}px`,
                 top: `${toolbarSelection.clientY - 65}px`, // Centered beautifully above selection
@@ -1000,6 +1129,17 @@ export default function ReaderView({
                   <span>Highlight</span>
                 </button>
 
+                {selectedHighlightIds.length > 0 && (
+                  <button
+                    onClick={handleRemoveSelectedHighlights}
+                    className="flex flex-col items-center text-[9px] font-semibold text-gray-500 hover:text-rose-600 transition-colors"
+                    title="Remove highlight from this selection"
+                  >
+                    <RotateCcw className="w-4 h-4 text-rose-500" />
+                    <span>Unhighlight</span>
+                  </button>
+                )}
+
                 {/* 2. Custom Notes Button toggler */}
                 <button
                   onClick={() => setAddingNote(!addingNote)}
@@ -1012,7 +1152,7 @@ export default function ReaderView({
                 {/* 3. Narrate Here button */}
                 <button
                   onClick={() => {
-                    onJumpTo(toolbarSelection.paragraphIndex, toolbarSelection.sentenceIndex);
+                    onJumpTo(toolbarSelection.startParagraphIndex, toolbarSelection.startSentenceIndex);
                     setIsPlaying(true);
                   }}
                   className="flex flex-col items-center text-[9px] font-semibold text-gray-500 hover:text-teal-600 transition-colors"
@@ -1102,26 +1242,26 @@ export default function ReaderView({
 
               <button
                 onClick={() => {
-                  if (document.processingStatus !== "ready") {
-                    alert("Please click 'Load High-Fidelity Voice Synthesis Engine' at the top of the book page to generate the narrated audio map first!");
+                  if (!isSelectedVoiceReady) {
+                    alert("Generate the full-book Kokoro audio for the selected voice before pressing play.");
                     return;
                   }
                   setIsPlaying(!isPlaying);
                 }}
                 disabled={audioLoading || (document.processingStatus === "processing")}
                 className={`w-12 h-12 rounded-full flex items-center justify-center shadow-lg hover:shadow-xl transition-all hover:scale-105 ${
-                  document.processingStatus !== "ready"
+                  !isSelectedVoiceReady
                     ? "bg-gray-200 dark:bg-zinc-800 text-gray-400 dark:text-zinc-650 cursor-not-allowed"
                     : "bg-teal-600 hover:bg-teal-500 text-white"
                 }`}
-                title={document.processingStatus !== "ready" ? "Generate audio map to activate playback" : "Narrate"}
+                title={!isSelectedVoiceReady ? "Generate Kokoro audio to activate playback" : "Narrate"}
               >
                 {audioLoading ? (
                   <span className="w-4 h-4 rounded-full border-2 border-t-transparent border-teal-500 animate-spin" />
                 ) : isPlaying ? (
                   <Pause className="w-5 h-5 fill-white" />
                 ) : (
-                  <Play className={`w-5 h-5 ${document.processingStatus !== "ready" ? "fill-gray-400 text-gray-400" : "fill-white text-white translate-x-0.5"}`} />
+                  <Play className={`w-5 h-5 ${!isSelectedVoiceReady ? "fill-gray-400 text-gray-400" : "fill-white text-white translate-x-0.5"}`} />
                 )}
               </button>
 
@@ -1164,6 +1304,7 @@ export default function ReaderView({
               <select
                 value={selectedVoice}
                 onChange={(e) => setSelectedVoice(e.target.value)}
+                disabled={document.processingStatus === "processing"}
                 className="bg-gray-50 dark:bg-zinc-90 border border-gray-200 dark:border-white/10 rounded px-1.5 py-1 text-[11px] font-semibold focus:outline-none dark:text-gray-200 select-voice-config"
               >
                 {VOICES.map((v) => (
@@ -1179,45 +1320,4 @@ export default function ReaderView({
       </footer >
     </div >
   );
-}
-
-// Convert raw 16-bit Mono PCM base64 audio into a valid playable WAV blob URL
-function pcmToWavBlob(base64Pcm: string, sampleRate: number = 24000): string {
-  const binaryString = window.atob(base64Pcm);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-
-  const buffer = new ArrayBuffer(44 + len);
-  const view = new DataView(buffer);
-
-  // Write WA-RIFF Header
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + len, true);
-  writeString(view, 8, "WAVE");
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // Linear PCM
-  view.setUint16(22, 1, true); // Mono channel
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // 16-bit mono byte rate
-  view.setUint16(32, 2, true); // block align
-  view.setUint16(34, 16, true); // 16 bits per sample
-  writeString(view, 36, "data");
-  view.setUint32(40, len, true);
-
-  // Copy PCM data
-  const wavBytes = new Uint8Array(buffer);
-  wavBytes.set(bytes, 44);
-
-  const blob = new Blob([wavBytes], { type: "audio/wav" });
-  return URL.createObjectURL(blob);
-}
-
-function writeString(view: DataView, offset: number, str: string) {
-  for (let i = 0; i < str.length; i++) {
-    view.setUint8(offset + i, str.charCodeAt(i));
-  }
 }

@@ -5,6 +5,16 @@
 
 import { Document, Paragraph, Sentence, Chapter } from "../types";
 
+const CODE_FENCE_PATTERN = /^\s*```/;
+const HEADING_PATTERN = /^\s{0,3}#{1,6}\s+\S+/;
+const BULLET_LIST_PATTERN = /^\s*[-+*]\s+\S+/;
+const NUMBERED_LIST_PATTERN = /^\s*\d+\.\s+\S+/;
+const BLOCKQUOTE_PATTERN = /^\s*>\s?/;
+const THEMATIC_BREAK_PATTERN = /^\s{0,3}(?:[-*_]\s*){3,}$/;
+const TABLE_ROW_PATTERN = /^\s*\|.*\|\s*$/;
+const MAX_PROSE_CHARS = 1200;
+const MAX_PROSE_SENTENCES = 6;
+
 // Helper to generate IDs
 function makeId(): string {
   return Math.random().toString(36).substring(2, 9);
@@ -48,6 +58,240 @@ export function cleanMarkdownInline(rawText: string): string {
   return text;
 }
 
+function isHeadingLine(line: string): boolean {
+  return HEADING_PATTERN.test(line);
+}
+
+function isListLine(line: string): boolean {
+  return BULLET_LIST_PATTERN.test(line) || NUMBERED_LIST_PATTERN.test(line);
+}
+
+function isBlockquoteLine(line: string): boolean {
+  return BLOCKQUOTE_PATTERN.test(line);
+}
+
+function isTableLine(line: string): boolean {
+  return TABLE_ROW_PATTERN.test(line);
+}
+
+function isStructuralMarkdownLine(line: string): boolean {
+  return (
+    CODE_FENCE_PATTERN.test(line) ||
+    isHeadingLine(line) ||
+    isListLine(line) ||
+    isBlockquoteLine(line) ||
+    THEMATIC_BREAK_PATTERN.test(line)
+  );
+}
+
+function splitWordsIntoChunks(text: string, maxChars: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return [];
+  }
+
+  const chunks: string[] = [];
+  let currentChunk = words[0];
+
+  for (let index = 1; index < words.length; index += 1) {
+    const candidate = `${currentChunk} ${words[index]}`;
+    if (candidate.length <= maxChars) {
+      currentChunk = candidate;
+      continue;
+    }
+
+    chunks.push(currentChunk);
+    currentChunk = words[index];
+  }
+
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}
+
+function chunkPlainTextBlock(text: string): string[] {
+  const normalizedText = text.replace(/\s+/g, " ").trim();
+  if (!normalizedText) {
+    return [];
+  }
+
+  if (normalizedText.length <= MAX_PROSE_CHARS) {
+    return [normalizedText];
+  }
+
+  const sentenceTexts = segmentSentences(normalizedText)
+    .map((sentence) => sentence.text.trim())
+    .filter(Boolean);
+
+  if (sentenceTexts.length <= 1) {
+    return splitWordsIntoChunks(normalizedText, MAX_PROSE_CHARS);
+  }
+
+  const chunks: string[] = [];
+  let currentChunk = "";
+  let currentSentenceCount = 0;
+
+  for (const sentenceText of sentenceTexts) {
+    const candidate = currentChunk ? `${currentChunk} ${sentenceText}` : sentenceText;
+    if (
+      currentChunk &&
+      (candidate.length > MAX_PROSE_CHARS || currentSentenceCount >= MAX_PROSE_SENTENCES)
+    ) {
+      chunks.push(currentChunk);
+      currentChunk = sentenceText;
+      currentSentenceCount = 1;
+      continue;
+    }
+
+    currentChunk = candidate;
+    currentSentenceCount += 1;
+  }
+
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks.flatMap((chunk) => {
+    return chunk.length > MAX_PROSE_CHARS
+      ? splitWordsIntoChunks(chunk, MAX_PROSE_CHARS)
+      : [chunk];
+  });
+}
+
+function extractStructuredBlocks(rawText: string): string[] {
+  const lines = rawText.split("\n");
+  const blocks: string[] = [];
+  let lineIndex = 0;
+
+  while (lineIndex < lines.length) {
+    const currentLine = lines[lineIndex];
+    const trimmedLine = currentLine.trim();
+
+    if (!trimmedLine) {
+      lineIndex += 1;
+      continue;
+    }
+
+    if (CODE_FENCE_PATTERN.test(currentLine)) {
+      const codeFenceLines = [currentLine];
+      lineIndex += 1;
+
+      while (lineIndex < lines.length) {
+        codeFenceLines.push(lines[lineIndex]);
+        if (CODE_FENCE_PATTERN.test(lines[lineIndex])) {
+          lineIndex += 1;
+          break;
+        }
+        lineIndex += 1;
+      }
+
+      blocks.push(codeFenceLines.join("\n").trim());
+      continue;
+    }
+
+    if (isHeadingLine(currentLine) || THEMATIC_BREAK_PATTERN.test(currentLine)) {
+      blocks.push(trimmedLine);
+      lineIndex += 1;
+      continue;
+    }
+
+    if (isTableLine(currentLine) && lineIndex + 1 < lines.length && isTableLine(lines[lineIndex + 1])) {
+      const tableLines: string[] = [];
+      while (lineIndex < lines.length) {
+        const tableLine = lines[lineIndex].trim();
+        if (!tableLine || !isTableLine(tableLine)) {
+          break;
+        }
+        tableLines.push(tableLine);
+        lineIndex += 1;
+      }
+      blocks.push(...tableLines);
+      continue;
+    }
+
+    if (isBlockquoteLine(currentLine)) {
+      const blockquoteLines: string[] = [];
+      while (lineIndex < lines.length) {
+        const quoteLine = lines[lineIndex].trim();
+        if (!quoteLine || !isBlockquoteLine(quoteLine)) {
+          break;
+        }
+        blockquoteLines.push(quoteLine);
+        lineIndex += 1;
+      }
+      blocks.push(blockquoteLines.join("\n"));
+      continue;
+    }
+
+    if (isListLine(currentLine)) {
+      const listItemLines = [trimmedLine];
+      lineIndex += 1;
+
+      while (lineIndex < lines.length) {
+        const continuationLine = lines[lineIndex];
+        const continuationText = continuationLine.trim();
+
+        if (!continuationText) {
+          lineIndex += 1;
+          break;
+        }
+
+        if (
+          isStructuralMarkdownLine(continuationLine) ||
+          (isTableLine(continuationLine) && lineIndex + 1 < lines.length && isTableLine(lines[lineIndex + 1]))
+        ) {
+          break;
+        }
+
+        listItemLines.push(continuationText);
+        lineIndex += 1;
+      }
+
+      blocks.push(listItemLines.join(" "));
+      continue;
+    }
+
+    const proseLines = [trimmedLine];
+    lineIndex += 1;
+
+    while (lineIndex < lines.length) {
+      const nextLine = lines[lineIndex];
+      const nextText = nextLine.trim();
+
+      if (!nextText) {
+        lineIndex += 1;
+        break;
+      }
+
+      if (
+        isStructuralMarkdownLine(nextLine) ||
+        (isTableLine(nextLine) && lineIndex + 1 < lines.length && isTableLine(lines[lineIndex + 1]))
+      ) {
+        break;
+      }
+
+      proseLines.push(nextText);
+      lineIndex += 1;
+    }
+
+    blocks.push(...chunkPlainTextBlock(proseLines.join(" ")));
+  }
+
+  return blocks.filter(Boolean);
+}
+
+function findNextReadableParagraphIndex(paragraphs: string[], currentIndex: number): number {
+  for (let index = currentIndex + 1; index < paragraphs.length; index += 1) {
+    if (paragraphs[index]?.trim()) {
+      return index;
+    }
+  }
+
+  return Math.min(currentIndex, Math.max(paragraphs.length - 1, 0));
+}
+
 // Full document processing pipeline
 export function processRawText(
   title: string,
@@ -56,20 +300,17 @@ export function processRawText(
   coverUrl?: string
 ): Document {
   // Normalize line endings
-  const normalized = rawText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const normalized = rawText.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   
-  // Split into raw paragraphs (delimited by double newlines)
-  const rawParagraphs = normalized.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  // Break Markdown into structural blocks first so headings, lists, quotes, and code fences survive import.
+  const rawParagraphs = extractStructuredBlocks(normalized);
   
   const paragraphs: Paragraph[] = [];
   const chapters: Chapter[] = [];
-  
-  let currentChapterParagraphIndex = 0;
-  let chCount = 1;
 
   rawParagraphs.forEach((pText, pIdx) => {
     const isCode = pText.startsWith("```");
-    const isHeader = pText.startsWith("#");
+    const isHeader = isHeadingLine(pText);
 
     // Check if paragraph is a header (like CHAPTER I, Chapter 1, markdown headers)
     const isChapterHeader = 
@@ -80,14 +321,13 @@ export function processRawText(
       (pText.length < 40 && pIdx === 0);
 
     if (isChapterHeader) {
-      const cleanTitle = pText.replace(/^#+\s*/, "");
+      const cleanTitle = cleanMarkdownInline(pText.replace(/^#+\s*/, "").trim());
       chapters.push({
         id: makeId(),
         title: cleanTitle,
-        startParagraphId: `p-${pIdx + 1}`, // will be the next text paragraph
-        paragraphIndex: Math.min(pIdx + 1, rawParagraphs.length - 1)
+        startParagraphId: `p-${findNextReadableParagraphIndex(rawParagraphs, pIdx)}`,
+        paragraphIndex: findNextReadableParagraphIndex(rawParagraphs, pIdx)
       });
-      chCount++;
     }
 
     // Isolate and clean the sentences inside the paragraph

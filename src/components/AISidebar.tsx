@@ -410,8 +410,16 @@ export default function AISidebar({
                       key={h.id}
                       className="p-2.5 bg-gray-50 dark:bg-zinc-900 border border-gray-150 dark:border-white/5 rounded-lg space-y-1.5"
                     >
+                      {(() => {
+                        const startParagraph = h.paragraphIndex;
+                        const endParagraph = h.endParagraphIndex ?? h.paragraphIndex;
+                        const paragraphLabel = startParagraph === endParagraph
+                          ? `Para ${startParagraph + 1}`
+                          : `Paras ${startParagraph + 1}-${endParagraph + 1}`;
+
+                        return (
                       <div className="flex justify-between items-start gap-1">
-                        <span className="text-[10px] font-mono text-gray-400">Para {h.paragraphIndex + 1}</span>
+                        <span className="text-[10px] font-mono text-gray-400">{paragraphLabel}</span>
                         <div className="flex gap-1.5">
                           <button
                             onClick={() => onJumpTo(h.paragraphIndex, h.sentenceIndex)}
@@ -427,6 +435,8 @@ export default function AISidebar({
                           </button>
                         </div>
                       </div>
+                        );
+                      })()}
                       <p className={`p-1.5 rounded text-[11px] italic leading-snug border-l-2 border-teal-500 bg-white dark:bg-zinc-950 text-gray-700 dark:text-gray-300`}>
                         "{h.text}"
                       </p>

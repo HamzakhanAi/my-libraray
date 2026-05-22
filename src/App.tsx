@@ -16,7 +16,7 @@ import {
   deleteBookmarkFromCloud, 
   listenToUserCollection 
 } from "./lib/firebaseService";
-import { Document, Highlight, Bookmark } from "./types";
+import { AudioProfile, Document, Highlight, Bookmark } from "./types";
 import { getPresetBooks } from "./data/presets";
 import LibraryView from "./components/LibraryView";
 import ReaderView from "./components/ReaderView";
@@ -167,15 +167,19 @@ export default function App() {
   };
 
   // Save book changes
-  const saveBooks = (updated: Document[]) => {
-    setBooks(updated);
-    localStorage.setItem("lumen_library_books", JSON.stringify(updated));
+  const saveBooks = (updated: Document[] | ((current: Document[]) => Document[])) => {
+    setBooks((current) => {
+      const next = typeof updated === "function"
+        ? (updated as (current: Document[]) => Document[])(current)
+        : updated;
+      localStorage.setItem("lumen_library_books", JSON.stringify(next));
+      return next;
+    });
   };
 
   // Add book to shelves
   const handleUploadBook = (newBook: Document) => {
-    const updated = [newBook, ...books];
-    saveBooks(updated);
+    saveBooks((current) => [newBook, ...current]);
     if (user) {
       saveBookToCloud(user.uid, user.email || "", newBook);
     }
@@ -183,8 +187,7 @@ export default function App() {
 
   // Remove book from shelves
   const handleRemoveBook = (id: string) => {
-    const updated = books.filter((b) => b.id !== id);
-    saveBooks(updated);
+    saveBooks((current) => current.filter((b) => b.id !== id));
     if (selectedBookId === id) setSelectedBookId(null);
     if (user) {
       deleteBookFromCloud(user.uid, user.email || "", id);
@@ -193,42 +196,62 @@ export default function App() {
 
   // Track sentence / progress updates
   const handleUpdateProgress = (bookId: string, pIdx: number, sIdx: number) => {
-    const updated = books.map((b) => {
-      if (b.id === bookId) {
-        const docUpdates = {
-          ...b,
-          progress: {
-            paragraphIndex: pIdx,
-            sentenceIndex: sIdx,
-            updatedAt: new Date().toISOString(),
-          },
-        };
-        if (user) {
-          saveBookToCloud(user.uid, user.email || "", docUpdates);
+    saveBooks((current) => {
+      return current.map((b) => {
+        if (b.id === bookId) {
+          const docUpdates = {
+            ...b,
+            progress: {
+              paragraphIndex: pIdx,
+              sentenceIndex: sIdx,
+              updatedAt: new Date().toISOString(),
+            },
+          };
+          if (user) {
+            saveBookToCloud(user.uid, user.email || "", docUpdates);
+          }
+          return docUpdates;
         }
-        return docUpdates;
-      }
-      return b;
+        return b;
+      });
     });
-    saveBooks(updated);
   };
 
   // Process Document Audio Status Transition
   const handleUpdateStatus = (bookId: string, status: "unprocessed" | "processing" | "ready" | "failed") => {
-    const updated = books.map((b) => {
-      if (b.id === bookId) {
-        const docUpdates = {
-          ...b,
-          processingStatus: status,
-        };
-        if (user) {
-          saveBookToCloud(user.uid, user.email || "", docUpdates);
+    saveBooks((current) => {
+      return current.map((b) => {
+        if (b.id === bookId) {
+          const docUpdates = {
+            ...b,
+            processingStatus: status,
+          };
+          if (user) {
+            saveBookToCloud(user.uid, user.email || "", docUpdates);
+          }
+          return docUpdates;
         }
-        return docUpdates;
-      }
-      return b;
+        return b;
+      });
     });
-    saveBooks(updated);
+  };
+
+  const handleUpdateAudioProfile = (bookId: string, audioProfile: AudioProfile | null) => {
+    saveBooks((current) => {
+      return current.map((b) => {
+        if (b.id === bookId) {
+          const docUpdates = {
+            ...b,
+            audioProfile,
+          };
+          if (user) {
+            saveBookToCloud(user.uid, user.email || "", docUpdates);
+          }
+          return docUpdates;
+        }
+        return b;
+      });
+    });
   };
 
   // Manage Study Highlights
@@ -238,18 +261,22 @@ export default function App() {
       id: Math.random().toString(36).substring(2, 9),
       createdAt: new Date().toISOString(),
     };
-    const updated = [item, ...highlights];
-    setHighlights(updated);
-    localStorage.setItem("lumen_library_highlights", JSON.stringify(updated));
+    setHighlights((current) => {
+      const updated = [item, ...current];
+      localStorage.setItem("lumen_library_highlights", JSON.stringify(updated));
+      return updated;
+    });
     if (user) {
       saveHighlightToCloud(user.uid, user.email || "", item);
     }
   };
 
   const handleRemoveHighlight = (id: string) => {
-    const updated = highlights.filter((h) => h.id !== id);
-    setHighlights(updated);
-    localStorage.setItem("lumen_library_highlights", JSON.stringify(updated));
+    setHighlights((current) => {
+      const updated = current.filter((h) => h.id !== id);
+      localStorage.setItem("lumen_library_highlights", JSON.stringify(updated));
+      return updated;
+    });
     if (user) {
       deleteHighlightFromCloud(user.uid, user.email || "", id);
     }
@@ -309,8 +336,10 @@ export default function App() {
           onBack={() => setSelectedBookId(null)}
           onUpdateProgress={(pIdx, sIdx) => handleUpdateProgress(activeBook.id, pIdx, sIdx)}
           onAddHighlight={handleAddHighlight}
+          onRemoveHighlight={handleRemoveHighlight}
           onAddBookmark={handleAddBookmark}
           onUpdateStatus={handleUpdateStatus}
+          onUpdateAudioProfile={handleUpdateAudioProfile}
           showRightSidebar={isRightSidebarOpen}
           toggleRightSidebar={() => {
             setSidebarPanel("ai");
@@ -495,6 +524,7 @@ export default function App() {
               onUploadBook={handleUploadBook}
               onRemoveBook={handleRemoveBook}
               onUpdateStatus={handleUpdateStatus}
+              onUpdateAudioProfile={handleUpdateAudioProfile}
             />
           </main>
         </div>

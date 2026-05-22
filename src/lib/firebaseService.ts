@@ -72,7 +72,14 @@ export async function saveBookToCloud(userId: string, userEmail: string, book: D
       },
       durationMinutes: book.durationMinutes || 0,
       wordCount: book.wordCount || 0,
-      processingStatus: book.processingStatus || "ready"
+      processingStatus: book.processingStatus || "unprocessed",
+      audioProfile: book.audioProfile
+        ? {
+            voiceId: book.audioProfile.voiceId,
+            generatedAt: book.audioProfile.generatedAt,
+            segmentCount: book.audioProfile.segmentCount,
+          }
+        : null,
     });
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path, userId, userEmail);
@@ -99,6 +106,8 @@ export async function saveHighlightToCloud(userId: string, userEmail: string, h:
       documentId: h.documentId,
       paragraphIndex: h.paragraphIndex,
       sentenceIndex: h.sentenceIndex,
+      endParagraphIndex: h.endParagraphIndex ?? h.paragraphIndex,
+      endSentenceIndex: h.endSentenceIndex ?? h.sentenceIndex,
       text: h.text,
       color: h.color,
       note: h.note || null,

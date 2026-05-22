@@ -2,11 +2,14 @@
   "name": "react-example",
   "private": true,
   "version": "0.0.0",
+  "main": "desktop/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
+    "desktop": "npm run build && npm exec --yes --package electron@36.3.2 -c 'electron .'",
+    "desktop:dist": "npm run build && npm exec --yes --package electron-builder@26.0.12 -c 'electron-builder --mac dir'",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
@@ -19,6 +22,7 @@
     "firebase": "^12.13.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "pdfjs-dist": "^5.7.284",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "vite": "^6.2.3"
@@ -27,10 +31,45 @@
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
+    "electron": "^36.3.2",
+    "electron-builder": "^26.0.12",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
+  },
+  "build": {
+    "appId": "com.lumen.reader.desktop",
+    "productName": "Lumen Reader",
+    "electronVersion": "36.3.2",
+    "asar": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "desktop"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "scripts/**/*",
+      "src/**/*",
+      "firebase-applet-config.json",
+      "firestore.rules",
+      "metadata.json",
+      "requirements-kokoro.txt",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "icon": "desktop/icons/icon.icns",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    }
   }
 }

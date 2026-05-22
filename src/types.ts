@@ -29,6 +29,12 @@ export interface Chapter {
   paragraphIndex: number;
 }
 
+export interface AudioProfile {
+  voiceId: string;
+  generatedAt: string;
+  segmentCount: number;
+}
+
 export interface Document {
   id: string;
   title: string;
@@ -44,6 +50,7 @@ export interface Document {
   durationMinutes: number;
   wordCount: number;
   processingStatus: "unprocessed" | "ready" | "processing" | "failed";
+  audioProfile?: AudioProfile | null;
 }
 
 export interface Highlight {
@@ -51,6 +58,8 @@ export interface Highlight {
   documentId: string;
   paragraphIndex: number;
   sentenceIndex: number;
+  endParagraphIndex?: number;
+  endSentenceIndex?: number;
   text: string;
   color: string; // Tailwind bg color class
   note?: string;
