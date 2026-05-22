@@ -2,6 +2,7 @@ node_modules/
 build/
 dist/
 release/
+.vscode/
 coverage/
 .DS_Store
 *.log
