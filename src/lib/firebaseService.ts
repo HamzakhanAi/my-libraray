@@ -78,6 +78,7 @@ export async function saveBookToCloud(userId: string, userEmail: string, book: D
             voiceId: book.audioProfile.voiceId,
             generatedAt: book.audioProfile.generatedAt,
             segmentCount: book.audioProfile.segmentCount,
+            textFilterKey: book.audioProfile.textFilterKey || null,
           }
         : null,
     });

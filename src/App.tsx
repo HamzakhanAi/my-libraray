@@ -4,69 +4,76 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { BookOpen, Settings, Sun, Moon, Sparkles, BookMarked, HelpCircle, Eye, RefreshCw, LogIn, LogOut, Cloud, CloudOff } from "lucide-react";
+import { BookOpen, Sun, Moon, Cloud, CloudOff, LogIn, LogOut } from "lucide-react";
 import { auth } from "./firebase";
 import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from "firebase/auth";
-import { 
-  saveBookToCloud, 
-  deleteBookFromCloud, 
-  saveHighlightToCloud, 
-  deleteHighlightFromCloud, 
-  saveBookmarkToCloud, 
-  deleteBookmarkFromCloud, 
-  listenToUserCollection 
+import {
+  saveBookToCloud,
+  deleteBookFromCloud,
+  saveHighlightToCloud,
+  deleteHighlightFromCloud,
+  saveBookmarkToCloud,
+  deleteBookmarkFromCloud,
+  listenToUserCollection
 } from "./lib/firebaseService";
 import { AudioProfile, Document, Highlight, Bookmark } from "./types";
 import { getPresetBooks } from "./data/presets";
 import LibraryView from "./components/LibraryView";
 import ReaderView from "./components/ReaderView";
-import AccessibilitySettings, { AccessibilityConfig, FontStyle } from "./components/AccessibilitySettings";
+import AccessibilitySettings, { AccessibilityConfig } from "./components/AccessibilitySettings";
 import AISidebar from "./components/AISidebar";
+import { DEFAULT_TEXT_FILTER_CONFIG } from "./lib/textFilters";
+
+const DEFAULT_ACCESSIBILITY_CONFIG: AccessibilityConfig = {
+  fontStyle: "serif",
+  fontSize: 19,
+  lineHeight: 1.65,
+  bionicReading: false,
+  readingRuler: false,
+  rulerPosition: 40,
+  textSpacing: "normal",
+  textFilters: DEFAULT_TEXT_FILTER_CONFIG,
+};
+
+function loadAccessibilityConfig(): AccessibilityConfig {
+  try {
+    const savedConfig = localStorage.getItem("lumen_accessibility_config");
+    if (!savedConfig) {
+      return DEFAULT_ACCESSIBILITY_CONFIG;
+    }
+
+    const parsed = JSON.parse(savedConfig) as Partial<AccessibilityConfig>;
+    return {
+      ...DEFAULT_ACCESSIBILITY_CONFIG,
+      ...parsed,
+      textFilters: {
+        ...DEFAULT_TEXT_FILTER_CONFIG,
+        ...(parsed.textFilters || {}),
+      },
+    };
+  } catch {
+    return DEFAULT_ACCESSIBILITY_CONFIG;
+  }
+}
 
 export default function App() {
-  // Authentication user context
   const [user, setUser] = useState<User | null>(null);
-
-  // 1. Library State Stateful Persistence
   const [books, setBooks] = useState<Document[]>([]);
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
-  
-  // Study logs
   const [highlights, setHighlights] = useState<Highlight[]>([]);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
-
-  // 2. Color Themes State
   const [theme, setTheme] = useState<"daylight" | "parchment" | "midnight" | "contrast">("daylight");
-
-  // 3. Accessibility Configuration Defaults
-  const [accessibilityConfig, setAccessibilityConfig] = useState<AccessibilityConfig>({
-    fontStyle: "serif",
-    fontSize: 19,
-    lineHeight: 1.65,
-    bionicReading: false,
-    readingRuler: false,
-    rulerPosition: 40,
-    textSpacing: "normal",
-  });
-
-  // Collapsible Right study panel settings drawer
+  const [accessibilityConfig, setAccessibilityConfig] = useState<AccessibilityConfig>(() => loadAccessibilityConfig());
   const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(false);
   const [sidebarPanel, setSidebarPanel] = useState<"ai" | "settings">("ai");
 
-  // Authentication observer listener effect
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
-      if (currentUser) {
-        console.log("[Lumen Auth]: Logged in user:", currentUser.email);
-      } else {
-        console.log("[Lumen Auth]: Guest session.");
-      }
     });
     return () => unsubscribe();
   }, []);
 
-  // Sync state with cloud when authenticated, or fallback to local storage
   useEffect(() => {
     if (!user) {
       const savedBooks = localStorage.getItem("lumen_library_books");
@@ -94,8 +101,6 @@ export default function App() {
       return;
     }
 
-    console.log("[Lumen Real-Time Sync]: Running sync listeners for:", user.uid);
-
     const unsubBooks = listenToUserCollection<Document>(
       user.uid,
       "books",
@@ -104,7 +109,6 @@ export default function App() {
         if (cloudBooks.length > 0) {
           setBooks(cloudBooks);
         } else {
-          // Empty cloud, seed with current local library or presets
           const localBooks = books.length > 0 ? books : getPresetBooks();
           localBooks.forEach(async (book) => {
             await saveBookToCloud(user.uid, user.email || "", book);
@@ -141,13 +145,16 @@ export default function App() {
     };
   }, [user]);
 
-  // Load visual defaults on start
   useEffect(() => {
     const savedTheme = localStorage.getItem("lumen_theme");
     if (savedTheme) {
       setTheme(savedTheme as any);
     }
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem("lumen_accessibility_config", JSON.stringify(accessibilityConfig));
+  }, [accessibilityConfig]);
 
   const handleGoogleLogin = async () => {
     try {
@@ -166,7 +173,6 @@ export default function App() {
     }
   };
 
-  // Save book changes
   const saveBooks = (updated: Document[] | ((current: Document[]) => Document[])) => {
     setBooks((current) => {
       const next = typeof updated === "function"
@@ -177,7 +183,6 @@ export default function App() {
     });
   };
 
-  // Add book to shelves
   const handleUploadBook = (newBook: Document) => {
     saveBooks((current) => [newBook, ...current]);
     if (user) {
@@ -185,7 +190,6 @@ export default function App() {
     }
   };
 
-  // Remove book from shelves
   const handleRemoveBook = (id: string) => {
     saveBooks((current) => current.filter((b) => b.id !== id));
     if (selectedBookId === id) setSelectedBookId(null);
@@ -194,7 +198,6 @@ export default function App() {
     }
   };
 
-  // Track sentence / progress updates
   const handleUpdateProgress = (bookId: string, pIdx: number, sIdx: number) => {
     saveBooks((current) => {
       return current.map((b) => {
@@ -217,7 +220,6 @@ export default function App() {
     });
   };
 
-  // Process Document Audio Status Transition
   const handleUpdateStatus = (bookId: string, status: "unprocessed" | "processing" | "ready" | "failed") => {
     saveBooks((current) => {
       return current.map((b) => {
@@ -254,7 +256,6 @@ export default function App() {
     });
   };
 
-  // Manage Study Highlights
   const handleAddHighlight = (newH: Omit<Highlight, "id" | "createdAt">) => {
     const item: Highlight = {
       ...newH,
@@ -282,7 +283,6 @@ export default function App() {
     }
   };
 
-  // Manage Saved bookmarks
   const handleAddBookmark = (newB: Omit<Bookmark, "id" | "createdAt">) => {
     const item: Bookmark = {
       ...newB,
@@ -306,25 +306,20 @@ export default function App() {
     }
   };
 
-
-
   const changeTheme = (newTheme: typeof theme) => {
     setTheme(newTheme);
     localStorage.setItem("lumen_theme", newTheme);
   };
 
   const activeBook = books.find((b) => b.id === selectedBookId);
-
-  // Filters for book specific logs
   const activeBookHighlights = highlights.filter((h) => h.documentId === selectedBookId);
   const activeBookBookmarks = bookmarks.filter((b) => b.documentId === selectedBookId);
 
+  const isDark = theme === "midnight" || theme === "contrast";
+
   return (
     <div className={`min-h-screen transition-theme theme-${theme} font-sans`}>
-      {/* Dynamic Theme classes mapped correctly inside outer wrapper */}
-      
       {activeBook ? (
-        // ————— VIEW A: INDIVIDUAL BOOK READER VIEW —————
         <ReaderView
           document={activeBook}
           highlights={activeBookHighlights}
@@ -346,39 +341,39 @@ export default function App() {
             setIsRightSidebarOpen(!isRightSidebarOpen);
           }}
           rightSidebarContent={
-            <div className="h-full flex flex-col bg-white dark:bg-zinc-950">
-              {/* Header inside companion sidebar to toggle configuration settings vs tutor chatbot */}
-              <div className="h-12 shrink-0 border-b border-gray-150 dark:border-white/5 flex items-center justify-between px-3.5 bg-gray-50/50 dark:bg-zinc-900/50">
-                <span className="text-[11px] font-bold tracking-wider font-mono text-gray-400 capitalize flex items-center gap-1">
-                  <Sparkles className="w-3.5 h-3.5 text-teal-400" />
-                  {sidebarPanel === "ai" ? "Learning Companion" : "Preferences Settings"}
+            <div className="h-full flex flex-col" style={{ backgroundColor: "var(--surface-elevated)" }}>
+              <div className="h-12 shrink-0 flex items-center justify-between px-4 border-b"
+                style={{ borderColor: "var(--border-default)", backgroundColor: "var(--surface-page)" }}>
+                <span className="text-[11px] font-bold tracking-wider font-mono flex items-center gap-1.5"
+                  style={{ color: "var(--ink-muted)" }}>
+                  <BookOpen className="w-3.5 h-3.5" style={{ color: "var(--accent)" }} />
+                  {sidebarPanel === "ai" ? "Companion" : "Preferences"}
                 </span>
                 <div className="flex gap-1">
                   <button
                     onClick={() => setSidebarPanel("ai")}
-                    className={`p-1.5 rounded transition-colors text-xs font-semibold ${
-                      sidebarPanel === "ai"
-                        ? "bg-teal-600 text-white"
-                        : "hover:bg-gray-150 dark:hover:bg-white/5 text-gray-500"
-                    }`}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all"
+                    style={{
+                      backgroundColor: sidebarPanel === "ai" ? "var(--accent)" : "transparent",
+                      color: sidebarPanel === "ai" ? "#fff" : "var(--ink-muted)",
+                    }}
                   >
-                    AI Companion
+                    AI
                   </button>
                   <button
                     onClick={() => setSidebarPanel("settings")}
-                    className={`p-1.5 rounded transition-colors text-xs font-semibold ${
-                      sidebarPanel === "settings"
-                        ? "bg-teal-600 text-white"
-                        : "hover:bg-gray-150 dark:hover:bg-white/5 text-gray-500"
-                    }`}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all"
+                    style={{
+                      backgroundColor: sidebarPanel === "settings" ? "var(--accent)" : "transparent",
+                      color: sidebarPanel === "settings" ? "#fff" : "var(--ink-muted)",
+                    }}
                   >
-                    Theme/Fonts
+                    Theme
                   </button>
                 </div>
               </div>
 
-              {/* Toggle panels */}
-              <div className="flex-1 overflow-y-auto">
+              <div className="flex-1 overflow-y-auto custom-scrollbar">
                 {sidebarPanel === "ai" ? (
                   <AISidebar
                     document={activeBook}
@@ -392,30 +387,32 @@ export default function App() {
                   />
                 ) : (
                   <div className="p-4 space-y-6">
-                    {/* Theme Palettes selections */}
                     <div className="space-y-2">
-                      <label className="text-xs font-medium text-gray-500 block">Contrast Palette</label>
+                      <label className="text-[11px] font-semibold uppercase tracking-wider block" style={{ color: "var(--ink-muted)" }}>
+                        Contrast Palette
+                      </label>
                       <div className="grid grid-cols-2 gap-2">
                         {[
-                          { id: "daylight", name: "Daylight", style: "bg-[#FAF8F3] text-[#1B1B1A]" },
-                          { id: "parchment", name: "Parchment", style: "bg-[#F4ECD8] text-[#3A2E22]" },
-                          { id: "midnight", name: "Midnight", style: "bg-[#121315] text-[#E6E2D8] border border-white/10" },
-                          { id: "contrast", name: "AAA Black", style: "bg-black text-white border border-teal-500" },
+                          { id: "daylight", name: "Daylight", style: { backgroundColor: "#F5F3EF", color: "#1C1C1A" } },
+                          { id: "parchment", name: "Parchment", style: { backgroundColor: "#F0EBE0", color: "#2E2820" } },
+                          { id: "midnight", name: "Midnight", style: { backgroundColor: "#141516", color: "#E8E6E1", border: "1px solid rgba(255,255,255,0.08)" } },
+                          { id: "contrast", name: "High Contrast", style: { backgroundColor: "#000000", color: "#FFFFFF", border: "1px solid rgba(255,255,255,0.15)" } },
                         ].map((item) => (
                           <button
                             key={item.id}
                             onClick={() => changeTheme(item.id as any)}
-                            className={`w-full py-2 px-3 text-xs font-semibold rounded-lg text-center transition-all ${item.style} ${
-                              theme === item.id ? "ring-2 ring-teal-500 scale-[1.02]" : "opacity-80"
-                            }`}
+                            className="w-full py-2.5 px-3 text-xs font-semibold rounded-xl text-center transition-all"
+                            style={{
+                              ...item.style,
+                              boxShadow: theme === item.id ? `0 0 0 2px var(--accent)` : "none",
+                              opacity: theme === item.id ? 1 : 0.75,
+                            }}
                           >
                             {item.name}
                           </button>
                         ))}
                       </div>
                     </div>
-
-                    {/* Typeface and font scale Accessibility Adjustments */}
                     <AccessibilitySettings
                       config={accessibilityConfig}
                       onChange={setAccessibilityConfig}
@@ -427,97 +424,132 @@ export default function App() {
           }
         />
       ) : (
-        // ————— VIEW B: MAIN SHELF DASHBOARD VIEW —————
-        <div className="min-h-screen flex flex-col bg-slate-50/20 dark:bg-black/20 text-gray-900 dark:text-white">
-          {/* Header navigation bar */}
-          <header className="h-16 border-b border-gray-150 dark:border-white/10 flex items-center justify-between px-6 bg-white dark:bg-zinc-950 shadow-sm relative z-10 shrink-0">
-            <div className="flex items-center gap-2">
-              <span className="w-8 h-8 rounded-lg bg-gradient-to-br from-teal-500 to-indigo-600 flex items-center justify-center text-white font-serif font-black text-lg">
+        <div className="min-h-screen flex flex-col transition-theme" style={{ backgroundColor: "var(--surface-page)", color: "var(--ink-primary)" }}>
+          {/* Modern Header */}
+          <header
+            className="h-14 flex items-center justify-between px-4 sm:px-6 lg:px-8 border-b sticky top-0 z-50 transition-theme"
+            style={{
+              backgroundColor: "var(--surface-elevated)",
+              borderColor: "var(--border-default)",
+            }}
+          >
+            <div className="flex items-center gap-2.5">
+              <div
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-white font-serif font-black text-sm"
+                style={{ backgroundColor: "var(--accent)" }}
+              >
                 L
-              </span>
-              <span className="font-serif font-extrabold tracking-tight text-lg dark:text-white">
-                Lumen Reader
+              </div>
+              <span className="font-serif font-bold tracking-tight text-sm" style={{ color: "var(--ink-primary)" }}>
+                Lumen
               </span>
             </div>
 
-            {/* Quick dashboard theme controls and sign-in handlers */}
-            <div className="flex items-center gap-4">
-              {/* Cloud Storage Synchronize state */}
+            <div className="flex items-center gap-3">
+              {/* Cloud status */}
               {user ? (
-                <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 bg-teal-500/10 dark:bg-teal-400/10 text-teal-600 dark:text-teal-400 border border-teal-500/20 rounded-full text-[11px] font-bold font-mono">
-                  <Cloud className="w-3.5 h-3.5" />
-                  <span>Cloud Storage Synced</span>
+                <div
+                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold font-mono border"
+                  style={{
+                    backgroundColor: "var(--accent-subtle)",
+                    borderColor: "var(--accent-border)",
+                    color: "var(--accent)",
+                  }}
+                >
+                  <Cloud className="w-3 h-3" />
+                  <span>Synced</span>
                 </div>
               ) : (
-                <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-zinc-900 border border-slate-200/40 dark:border-white/5 text-slate-500 dark:text-zinc-500 rounded-full text-[11px] font-bold font-mono">
-                  <CloudOff className="w-3.5 h-3.5 animate-pulse" />
-                  <span>Cloud Off (Local Storage)</span>
+                <div
+                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold font-mono border"
+                  style={{
+                    backgroundColor: "var(--surface-hover)",
+                    borderColor: "var(--border-default)",
+                    color: "var(--ink-muted)",
+                  }}
+                >
+                  <CloudOff className="w-3 h-3" />
+                  <span>Local</span>
                 </div>
               )}
 
-              {/* Theme selectors */}
-              <div className="flex gap-1.5 bg-gray-50 dark:bg-zinc-90 w-fit p-1 rounded-lg border border-gray-200/50 dark:border-white/10 select-none">
-                {[
-                  { id: "daylight", icon: Sun, label: "Daylight" },
-                  { id: "midnight", icon: Moon, label: "Midnight" },
-                ].map((item) => {
-                  const Icon = item.icon;
-                  const isActive = theme === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => changeTheme(item.id as any)}
-                      className={`p-1.5 rounded-md transition-all ${
-                        isActive ? "bg-white dark:bg-zinc-900 text-teal-600 dark:text-teal-400 shadow cursor-pointer" : "text-gray-400 hover:text-[#1B1B1A]"
-                      }`}
-                      title={item.label}
-                    >
-                      <Icon className="w-4 h-4" />
-                    </button>
-                  );
-                })}
-              </div>
+              {/* Theme toggle */}
+              <button
+                onClick={() => changeTheme(isDark ? "daylight" : "midnight")}
+                className="w-8 h-8 rounded-lg flex items-center justify-center transition-all"
+                style={{
+                  backgroundColor: "var(--surface-hover)",
+                  color: "var(--ink-secondary)",
+                }}
+                title={isDark ? "Switch to light" : "Switch to dark"}
+              >
+                {isDark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+              </button>
 
-              {/* Google login badge triggers */}
+              {/* Auth */}
               {user ? (
-                <div className="flex items-center gap-2.5 pl-2.5 border-l border-zinc-200 dark:border-white/10">
-                  <div className="hidden lg:flex flex-col text-right text-xs">
-                    <span className="font-semibold text-gray-800 dark:text-white truncate max-w-[130px]">{user.displayName || "Lumen Reader"}</span>
-                    <span className="text-[10px] text-gray-400 dark:text-zinc-500 font-mono truncate max-w-[130px]">{user.email}</span>
+                <div className="flex items-center gap-2 pl-2 border-l" style={{ borderColor: "var(--border-default)" }}>
+                  <div className="hidden sm:flex flex-col text-right">
+                    <span className="text-[11px] font-semibold truncate max-w-[120px]" style={{ color: "var(--ink-primary)" }}>
+                      {user.displayName || "User"}
+                    </span>
                   </div>
                   {user.photoURL ? (
-                    <img 
-                      src={user.photoURL} 
-                      alt="User avatar" 
+                    <img
+                      src={user.photoURL}
+                      alt="User avatar"
                       referrerPolicy="no-referrer"
-                      className="w-8 h-8 rounded-full border border-teal-500/35 object-cover"
+                      className="w-7 h-7 rounded-full object-cover border"
+                      style={{ borderColor: "var(--border-strong)" }}
                     />
                   ) : (
-                    <div className="w-8 h-8 rounded-full bg-teal-600 text-white flex items-center justify-center font-bold text-xs select-none shadow">
+                    <div
+                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold text-[10px] text-white"
+                      style={{ backgroundColor: "var(--accent)" }}
+                    >
                       {user.email?.substring(0, 2).toUpperCase() || "LU"}
                     </div>
                   )}
                   <button
                     onClick={handleLogout}
-                    className="p-1.5 text-gray-400 hover:text-rose-500 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/20 rounded-lg transition-all cursor-pointer"
-                    title="Sign Out Cloud Session"
+                    className="p-1.5 rounded-lg transition-all"
+                    style={{ color: "var(--ink-muted)" }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = "rgba(184, 84, 80, 0.08)";
+                      e.currentTarget.style.color = "var(--status-failed)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = "transparent";
+                      e.currentTarget.style.color = "var(--ink-muted)";
+                    }}
                   >
-                    <LogOut className="w-4 h-4" />
+                    <LogOut className="w-3.5 h-3.5" />
                   </button>
                 </div>
               ) : (
                 <button
                   onClick={handleGoogleLogin}
-                  className="flex items-center gap-2 bg-zinc-900 hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-100 text-white font-bold text-xs py-2 px-3.5 rounded-xl cursor-pointer shadow hover:scale-[1.02] active:scale-95 transition-all"
+                  className="flex items-center gap-2 py-1.5 px-3 rounded-lg text-[11px] font-bold transition-all border"
+                  style={{
+                    backgroundColor: "var(--surface-page)",
+                    borderColor: "var(--border-strong)",
+                    color: "var(--ink-primary)",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = "var(--surface-hover)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = "var(--surface-page)";
+                  }}
                 >
-                  <LogIn className="w-3.5 h-3.5" />
-                  <span>Google Sign In</span>
+                  <LogIn className="w-3 h-3" />
+                  <span className="hidden sm:inline">Sign In</span>
                 </button>
               )}
             </div>
           </header>
 
-          <main className="flex-1 overflow-y-auto">
+          <main className="flex-1 overflow-y-auto custom-scrollbar">
             <LibraryView
               books={books}
               onSelectBook={setSelectedBookId}
@@ -525,6 +557,7 @@ export default function App() {
               onRemoveBook={handleRemoveBook}
               onUpdateStatus={handleUpdateStatus}
               onUpdateAudioProfile={handleUpdateAudioProfile}
+              textFilters={accessibilityConfig.textFilters}
             />
           </main>
         </div>

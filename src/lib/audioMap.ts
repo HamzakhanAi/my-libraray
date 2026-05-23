@@ -1,4 +1,5 @@
-import { Document } from "../types";
+import { Document, TextFilterConfig } from "../types";
+import { buildTextFilterKey, filterReadableText } from "./textFilters";
 
 export const DEFAULT_KOKORO_VOICE = "af_sarah";
 
@@ -22,6 +23,7 @@ type CachedAudioRecord = {
   documentVoiceKey: string;
   documentId: string;
   voiceId: string;
+  textFilterKey: string;
   segmentId: string;
   paragraphIndex: number;
   sentenceIndex: number;
@@ -44,11 +46,12 @@ export type AudioPreloadProgress = {
 export type AudioPreloadResult = {
   voiceId: string;
   segmentCount: number;
+  textFilterKey: string;
 };
 
 let audioDbPromise: Promise<IDBDatabase> | null = null;
 
-export function getNarratableSentenceText(rawText: string) {
+export function getNarratableSentenceText(rawText: string, textFilters?: TextFilterConfig) {
   let text = rawText.trim();
   if (!text) {
     return "";
@@ -73,6 +76,8 @@ export function getNarratableSentenceText(rawText: string) {
     .replace(/\|/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+  text = filterReadableText(text, textFilters);
 
   if (!HAS_NARRATABLE_CONTENT_PATTERN.test(text)) {
     return "";
@@ -126,12 +131,12 @@ function buildSegmentId(paragraphIndex: number, sentenceIndex: number) {
   return `${paragraphIndex}:${sentenceIndex}`;
 }
 
-function buildDocumentVoiceKey(documentId: string, voiceId: string) {
-  return `${documentId}:${voiceId}`;
+function buildDocumentVoiceKey(documentId: string, voiceId: string, textFilterKey: string) {
+  return `${documentId}:${voiceId}:${textFilterKey}`;
 }
 
-function buildCacheKey(documentId: string, voiceId: string, segmentId: string) {
-  return `${documentId}:${voiceId}:${segmentId}`;
+function buildCacheKey(documentId: string, voiceId: string, textFilterKey: string, segmentId: string) {
+  return `${documentId}:${voiceId}:${textFilterKey}:${segmentId}`;
 }
 
 function toPct(completed: number, total: number) {
@@ -145,19 +150,19 @@ function toDataUrl(audioBase64: string) {
   return `data:audio/wav;base64,${audioBase64}`;
 }
 
-async function listCachedKeys(documentId: string, voiceId: string) {
+async function listCachedKeys(documentId: string, voiceId: string, textFilterKey: string) {
   const db = await openAudioDb();
   const transaction = db.transaction(AUDIO_STORE_NAME, "readonly");
   const index = transaction.objectStore(AUDIO_STORE_NAME).index("documentVoiceKey");
-  const keys = await requestToPromise(index.getAllKeys(buildDocumentVoiceKey(documentId, voiceId)) as IDBRequest<IDBValidKey[]>);
+  const keys = await requestToPromise(index.getAllKeys(buildDocumentVoiceKey(documentId, voiceId, textFilterKey)) as IDBRequest<IDBValidKey[]>);
   return new Set(keys.map((key) => String(key)));
 }
 
-async function persistBatch(documentId: string, voiceId: string, segments: NarrationSegment[], results: TtsBatchResult[]) {
+async function persistBatch(documentId: string, voiceId: string, textFilterKey: string, segments: NarrationSegment[], results: TtsBatchResult[]) {
   const db = await openAudioDb();
   const transaction = db.transaction(AUDIO_STORE_NAME, "readwrite");
   const store = transaction.objectStore(AUDIO_STORE_NAME);
-  const documentVoiceKey = buildDocumentVoiceKey(documentId, voiceId);
+  const documentVoiceKey = buildDocumentVoiceKey(documentId, voiceId, textFilterKey);
   const now = new Date().toISOString();
   const segmentsById = new Map(segments.map((segment) => [segment.id, segment]));
 
@@ -168,10 +173,11 @@ async function persistBatch(documentId: string, voiceId: string, segments: Narra
     }
 
     const record: CachedAudioRecord = {
-      cacheKey: buildCacheKey(documentId, voiceId, segment.id),
+      cacheKey: buildCacheKey(documentId, voiceId, textFilterKey, segment.id),
       documentVoiceKey,
       documentId,
       voiceId,
+      textFilterKey,
       segmentId: segment.id,
       paragraphIndex: segment.paragraphIndex,
       sentenceIndex: segment.sentenceIndex,
@@ -209,12 +215,12 @@ async function requestBatchFromServer(segments: NarrationSegment[], voiceId: str
   return results;
 }
 
-export function getDocumentNarrationSegments(document: Document) {
+export function getDocumentNarrationSegments(document: Document, textFilters?: TextFilterConfig) {
   const segments: NarrationSegment[] = [];
 
   document.paragraphs.forEach((paragraph, paragraphIndex) => {
     paragraph.sentences.forEach((sentence, sentenceIndex) => {
-      const text = getNarratableSentenceText(sentence.text);
+      const text = getNarratableSentenceText(sentence.text, textFilters);
       if (!text) {
         return;
       }
@@ -236,6 +242,7 @@ export async function preloadDocumentAudio({
   voiceId = DEFAULT_KOKORO_VOICE,
   speed = 1,
   batchSize = DEFAULT_BATCH_SIZE,
+  textFilters,
   signal,
   onProgress,
 }: {
@@ -243,10 +250,12 @@ export async function preloadDocumentAudio({
   voiceId?: string;
   speed?: number;
   batchSize?: number;
+  textFilters?: TextFilterConfig;
   signal?: AbortSignal;
   onProgress?: (progress: AudioPreloadProgress) => void;
 }): Promise<AudioPreloadResult> {
-  const segments = getDocumentNarrationSegments(document);
+  const textFilterKey = buildTextFilterKey(textFilters);
+  const segments = getDocumentNarrationSegments(document, textFilters);
   const total = segments.length;
 
   if (total === 0) {
@@ -259,10 +268,11 @@ export async function preloadDocumentAudio({
     return {
       voiceId,
       segmentCount: 0,
+      textFilterKey,
     };
   }
 
-  const cachedKeys = await listCachedKeys(document.id, voiceId);
+  const cachedKeys = await listCachedKeys(document.id, voiceId, textFilterKey);
   let completed = Math.min(cachedKeys.size, total);
 
   onProgress?.({
@@ -274,7 +284,7 @@ export async function preloadDocumentAudio({
       : "Starting whole-book Kokoro synthesis...",
   });
 
-  const missingSegments = segments.filter((segment) => !cachedKeys.has(buildCacheKey(document.id, voiceId, segment.id)));
+  const missingSegments = segments.filter((segment) => !cachedKeys.has(buildCacheKey(document.id, voiceId, textFilterKey, segment.id)));
   if (missingSegments.length === 0) {
     onProgress?.({
       completed: total,
@@ -285,6 +295,7 @@ export async function preloadDocumentAudio({
     return {
       voiceId,
       segmentCount: total,
+      textFilterKey,
     };
   }
 
@@ -305,7 +316,7 @@ export async function preloadDocumentAudio({
     });
 
     const results = await requestBatchFromServer(batch, voiceId, speed);
-    await persistBatch(document.id, voiceId, batch, results);
+    await persistBatch(document.id, voiceId, textFilterKey, batch, results);
 
     completed = Math.min(total, completed + results.length);
     onProgress?.({
@@ -326,6 +337,7 @@ export async function preloadDocumentAudio({
   return {
     voiceId,
     segmentCount: total,
+    textFilterKey,
   };
 }
 
@@ -335,14 +347,17 @@ export async function ensureSentenceAudio({
   paragraphIndex,
   sentenceIndex,
   speed = 1,
+  textFilters,
 }: {
   document: Document;
   voiceId: string;
   paragraphIndex: number;
   sentenceIndex: number;
   speed?: number;
+  textFilters?: TextFilterConfig;
 }) {
-  const cacheKey = buildCacheKey(document.id, voiceId, buildSegmentId(paragraphIndex, sentenceIndex));
+  const textFilterKey = buildTextFilterKey(textFilters);
+  const cacheKey = buildCacheKey(document.id, voiceId, textFilterKey, buildSegmentId(paragraphIndex, sentenceIndex));
   const db = await openAudioDb();
   const transaction = db.transaction(AUDIO_STORE_NAME, "readonly");
   const store = transaction.objectStore(AUDIO_STORE_NAME);
@@ -353,7 +368,7 @@ export async function ensureSentenceAudio({
   }
 
   const sentence = document.paragraphs[paragraphIndex]?.sentences[sentenceIndex];
-  const text = sentence ? getNarratableSentenceText(sentence.text) : "";
+  const text = sentence ? getNarratableSentenceText(sentence.text, textFilters) : "";
   if (!text) {
     throw new Error("This block does not contain narratable text.");
   }
@@ -371,7 +386,7 @@ export async function ensureSentenceAudio({
     throw new Error("Kokoro returned no audio for this sentence.");
   }
 
-  await persistBatch(document.id, voiceId, [segment], results);
+  await persistBatch(document.id, voiceId, textFilterKey, [segment], results);
   return toDataUrl(firstResult.audio);
 }
 

@@ -3,6 +3,7 @@ build/
 dist/
 release/
 .vscode/
+.jetro/
 coverage/
 .DS_Store
 *.log

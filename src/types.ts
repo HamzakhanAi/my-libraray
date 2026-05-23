@@ -33,6 +33,16 @@ export interface AudioProfile {
   voiceId: string;
   generatedAt: string;
   segmentCount: number;
+  textFilterKey?: string;
+}
+
+export interface TextFilterConfig {
+  skipRoundBrackets: boolean;
+  skipSquareBrackets: boolean;
+  skipCurlyBrackets: boolean;
+  skipUrls: boolean;
+  skipSuperscriptSubscript: boolean;
+  skipVerticalText: boolean;
 }
 
 export interface Document {

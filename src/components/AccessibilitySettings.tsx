@@ -4,7 +4,8 @@
  */
 
 import React from "react";
-import { Eye, Type, AlignLeft, ShieldAlert } from "lucide-react";
+import { AlignLeft, ArrowUpDown, Braces, Brackets, Eye, Link2, ListFilter, Parentheses, ShieldAlert, Superscript, Type } from "lucide-react";
+import { TextFilterConfig } from "../types";
 
 export type FontStyle = "serif" | "sans" | "dyslexic" | "hyperlegible" | "mono";
 
@@ -16,6 +17,7 @@ export interface AccessibilityConfig {
   readingRuler: boolean;
   rulerPosition: number; // in % from top of viewport or card
   textSpacing: "normal" | "wide" | "wider";
+  textFilters: TextFilterConfig;
 }
 
 interface Props {
@@ -35,6 +37,36 @@ export default function AccessibilitySettings({ config, onChange }: Props) {
   const update = <K extends keyof AccessibilityConfig>(key: K, value: AccessibilityConfig[K]) => {
     onChange({ ...config, [key]: value });
   };
+
+  const updateTextFilter = <K extends keyof TextFilterConfig>(key: K, value: TextFilterConfig[K]) => {
+    onChange({
+      ...config,
+      textFilters: {
+        ...config.textFilters,
+        [key]: value,
+      },
+    });
+  };
+
+  const skipOptions: Array<{
+    key: keyof TextFilterConfig;
+    label: string;
+    detail: string;
+    icon: React.ComponentType<{ className?: string }>;
+  }> = [
+    { key: "skipRoundBrackets", label: "Round Brackets", detail: "Skip text in round brackets", icon: Parentheses },
+    { key: "skipSquareBrackets", label: "Square Brackets", detail: "Skip text in square brackets", icon: Brackets },
+    { key: "skipCurlyBrackets", label: "Curly Brackets", detail: "Skip text in curly brackets", icon: Braces },
+    { key: "skipUrls", label: "URLs", detail: "Skip web links", icon: Link2 },
+    { key: "skipSuperscriptSubscript", label: "Superscript/Subscript", detail: "Skip raised and lowered markers", icon: Superscript },
+    { key: "skipVerticalText", label: "Vertical", detail: "Skip isolated vertical text artifacts", icon: ArrowUpDown },
+  ];
+
+  const Toggle = ({ enabled }: { enabled: boolean }) => (
+    <div className={`w-8 h-4 rounded-full transition-all relative ${enabled ? "bg-teal-500" : "bg-gray-300 dark:bg-zinc-700"}`}>
+      <div className={`w-3.5 h-3.5 bg-white rounded-full absolute top-[1px] transition-all ${enabled ? "left-[13px]" : "left-[1px]"}`} />
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -192,6 +224,42 @@ export default function AccessibilitySettings({ config, onChange }: Props) {
             />
           </div>
         )}
+      </div>
+
+      <div className="space-y-3 pt-2 border-t border-gray-200/50 dark:border-white/10">
+        <div className="flex items-center gap-2">
+          <ListFilter className="w-4 h-4 text-teal-600 dark:text-teal-400" />
+          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 block">Skip Text</label>
+        </div>
+
+        <div className="grid grid-cols-1 gap-2">
+          {skipOptions.map((option) => {
+            const Icon = option.icon;
+            const enabled = config.textFilters[option.key];
+            return (
+              <button
+                key={option.key}
+                onClick={() => updateTextFilter(option.key, !enabled)}
+                className={`w-full flex items-center justify-between gap-3 p-3 rounded-lg border text-left transition-all ${
+                  enabled
+                    ? "border-teal-500 bg-teal-50/10 dark:bg-teal-900/10"
+                    : "border-gray-200/50 dark:border-white/5 hover:bg-gray-50 dark:hover:bg-white/5"
+                }`}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="w-10 h-10 shrink-0 rounded-lg bg-white dark:bg-zinc-900 border border-gray-200/50 dark:border-white/5 flex items-center justify-center">
+                    <Icon className="w-5 h-5 text-gray-800 dark:text-zinc-200" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold text-gray-900 dark:text-zinc-100 truncate">{option.label}</span>
+                    <span className="block text-[11px] text-gray-500 dark:text-zinc-400 leading-normal">{option.detail}</span>
+                  </span>
+                </div>
+                <Toggle enabled={enabled} />
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Atkinson and Dyslexia guide notice */}

@@ -25,9 +25,14 @@ import {
   Clock,
   Menu,
   Loader2,
+  Search,
+  FileText,
+  Copy,
+  Pin,
 } from "lucide-react";
 import { AudioProfile, Document, Paragraph, Sentence, Highlight, Bookmark, Voice } from "../types";
 import { AccessibilityConfig } from "./AccessibilitySettings";
+import { buildTextFilterKey, filterReadableText } from "../lib/textFilters";
 import { ensureSentenceAudio, getDefaultVoiceId, getNarratableSentenceText, preloadDocumentAudio } from "../lib/audioMap";
 
 interface Props {
@@ -131,7 +136,8 @@ export default function ReaderView({
   const [localPct, setLocalPct] = useState(0);
   const [localStep, setLocalStep] = useState("");
 
-  const isSelectedVoiceReady = document.processingStatus === "ready" && document.audioProfile?.voiceId === selectedVoice;
+  const activeTextFilterKey = buildTextFilterKey(accessibilityConfig.textFilters);
+  const isSelectedVoiceReady = document.processingStatus === "ready" && document.audioProfile?.voiceId === selectedVoice && document.audioProfile?.textFilterKey === activeTextFilterKey;
   const selectedVoiceLabel = VOICES.find((voice) => voice.id === selectedVoice)?.name || selectedVoice;
   const generatedVoiceLabel = document.audioProfile?.voiceId
     ? VOICES.find((voice) => voice.id === document.audioProfile?.voiceId)?.name || document.audioProfile.voiceId
@@ -146,6 +152,7 @@ export default function ReaderView({
       const result = await preloadDocumentAudio({
         document,
         voiceId: selectedVoice,
+        textFilters: accessibilityConfig.textFilters,
         onProgress: ({ pct, step }) => {
           setLocalPct(pct);
           setLocalStep(step);
@@ -156,6 +163,7 @@ export default function ReaderView({
         voiceId: result.voiceId,
         generatedAt: new Date().toISOString(),
         segmentCount: result.segmentCount,
+        textFilterKey: result.textFilterKey,
       });
       onUpdateStatus(document.id, "ready");
       setLocalPct(100);
@@ -179,9 +187,11 @@ export default function ReaderView({
     endSentenceIndex: number;
   } | null>(null);
 
-  const [highlightColor, setHighlightColor] = useState("bg-teal-500/25 border-l-2 border-teal-500");
+  const [highlightColor, setHighlightColor] = useState("bg-[#E8D87D]/25 border-l-2 border-[#E8D87D]");
   const [noteInput, setNoteInput] = useState("");
   const [addingNote, setAddingNote] = useState(false);
+  const [popupMode, setPopupMode] = useState<"toolbar" | "colors" | "note">("toolbar");
+  const [copiedFlash, setCopiedFlash] = useState(false);
 
   // Reference hooks for dynamic scroll mapping
   const activeSentenceRef = useRef<HTMLSpanElement | null>(null);
@@ -270,7 +280,7 @@ export default function ReaderView({
 
       while (nextSentenceIndex >= 0 && nextSentenceIndex < currentParagraph.sentences.length) {
         const sentence = currentParagraph.sentences[nextSentenceIndex];
-        if (sentence && getNarratableSentenceText(sentence.text)) {
+        if (sentence && getNarratableSentenceText(sentence.text, accessibilityConfig.textFilters)) {
           return {
             paragraphIndex: nextParagraphIndex,
             sentenceIndex: nextSentenceIndex,
@@ -341,7 +351,7 @@ export default function ReaderView({
       return;
     }
 
-    const cacheKey = `${document.id}_${selectedVoice}_${targetCursor.paragraphIndex}_${targetCursor.sentenceIndex}`;
+    const cacheKey = `${document.id}_${selectedVoice}_${activeTextFilterKey}_${targetCursor.paragraphIndex}_${targetCursor.sentenceIndex}`;
 
     try {
       let resolvedUrl = audioCacheRef.current[cacheKey];
@@ -352,6 +362,7 @@ export default function ReaderView({
           voiceId: selectedVoice,
           paragraphIndex: targetCursor.paragraphIndex,
           sentenceIndex: targetCursor.sentenceIndex,
+          textFilters: accessibilityConfig.textFilters,
         });
         audioCacheRef.current[cacheKey] = resolvedUrl;
       }
@@ -391,7 +402,7 @@ export default function ReaderView({
       const upcoming = getUpcomingSentenceCursors(pIdx, sIdx, 2);
 
       for (const cursor of upcoming) {
-        const cacheKey = `${document.id}_${selectedVoice}_${cursor.paragraphIndex}_${cursor.sentenceIndex}`;
+        const cacheKey = `${document.id}_${selectedVoice}_${activeTextFilterKey}_${cursor.paragraphIndex}_${cursor.sentenceIndex}`;
         if (audioCacheRef.current[cacheKey]) {
           continue;
         }
@@ -402,6 +413,7 @@ export default function ReaderView({
             voiceId: selectedVoice,
             paragraphIndex: cursor.paragraphIndex,
             sentenceIndex: cursor.sentenceIndex,
+            textFilters: accessibilityConfig.textFilters,
           });
           audioCacheRef.current[cacheKey] = url;
         } catch (err) {
@@ -613,6 +625,8 @@ export default function ReaderView({
     const sel = window.getSelection();
     if (!sel || sel.toString().trim().length === 0) {
       setToolbarSelection(null);
+      setPopupMode("toolbar");
+      setAddingNote(false);
     }
   };
 
@@ -637,6 +651,7 @@ export default function ReaderView({
     setToolbarSelection(null);
     setNoteInput("");
     setAddingNote(false);
+    setPopupMode("toolbar");
   };
 
   const handleRemoveSelectedHighlights = () => {
@@ -657,7 +672,7 @@ export default function ReaderView({
     }
 
     const sentence = document.paragraphs[pIdx]?.sentences[sIdx];
-    if (!sentence || !getNarratableSentenceText(sentence.text)) {
+    if (!sentence || !getNarratableSentenceText(sentence.text, accessibilityConfig.textFilters)) {
       handleParagraphClick(pIdx);
       return;
     }
@@ -672,7 +687,7 @@ export default function ReaderView({
       return;
     }
 
-    const firstSentence = document.paragraphs[pIdx]?.sentences.find((sentence) => getNarratableSentenceText(sentence.text));
+    const firstSentence = document.paragraphs[pIdx]?.sentences.find((sentence) => getNarratableSentenceText(sentence.text, accessibilityConfig.textFilters));
     if (!firstSentence) {
       return;
     }
@@ -699,6 +714,30 @@ export default function ReaderView({
     setToolbarSelection(null);
     setNoteInput("");
     setAddingNote(false);
+    setPopupMode("toolbar");
+  };
+
+  const handleCopySelection = async () => {
+    if (!toolbarSelection) return;
+    try {
+      await navigator.clipboard.writeText(toolbarSelection.text);
+      setCopiedFlash(true);
+      setTimeout(() => setCopiedFlash(false), 1200);
+    } catch {
+      // fallback
+    }
+  };
+
+  const handlePinSelection = () => {
+    if (!toolbarSelection) return;
+    onAddBookmark({
+      documentId: document.id,
+      paragraphIndex: toolbarSelection.startParagraphIndex,
+      sentenceIndex: toolbarSelection.startSentenceIndex,
+      label: toolbarSelection.text.slice(0, 40) + (toolbarSelection.text.length > 40 ? "..." : ""),
+    });
+    setToolbarSelection(null);
+    setPopupMode("toolbar");
   };
 
   const handlePlaceBookmark = () => {
@@ -753,7 +792,11 @@ export default function ReaderView({
   };
 
   const renderSentenceWithFormat = (s: Sentence, isFocused: boolean, pIdx: number) => {
-    const sentenceText = s.text;
+    const sentenceText = filterReadableText(s.text, accessibilityConfig.textFilters);
+    if (!sentenceText) {
+      return null;
+    }
+
     const isHighlighted = highlights.find(
       (highlight) =>
         isCursorWithinRange(
@@ -1109,97 +1152,217 @@ export default function ReaderView({
           {/* FLOATING POPUP WORD TOOLBAR COMPONENT */}
           {toolbarSelection && (
             <div
-              className="selection-popup absolute bg-white dark:bg-zinc-900 border border-gray-200 dark:border-white/10 rounded-xl p-3 shadow-xl z-50 flex flex-col gap-2.5 w-[210px] animate-fade-in"
+              className="selection-popup absolute rounded-2xl p-3 shadow-2xl z-50 flex flex-col gap-2 select-none animate-fade-in-up"
               onMouseDown={(event) => {
                 event.preventDefault();
               }}
               style={{
-                left: `${toolbarSelection.clientX - 105}px`,
-                top: `${toolbarSelection.clientY - 65}px`, // Centered beautifully above selection
+                left: `${Math.max(12, Math.min(toolbarSelection.clientX - 130, (readerColumnRef.current?.clientWidth || 500) - 260))}px`,
+                top: `${Math.max(12, toolbarSelection.clientY - (popupMode === "colors" ? 140 : popupMode === "note" ? 180 : 105))}px`,
+                backgroundColor: "var(--surface-elevated)",
+                border: "1px solid var(--border-default)",
+                width: popupMode === "colors" ? "240px" : popupMode === "note" ? "240px" : "260px",
+                boxShadow: "0 12px 40px var(--shadow-elevated)",
               }}
             >
-              <div className="flex gap-1.5 justify-around border-b dark:border-white/10 pb-1.5 select-none">
-                {/* 1. Highlight Button */}
-                <button
-                  onClick={executeHighlight}
-                  className="flex flex-col items-center text-[9px] font-semibold text-gray-500 hover:text-teal-600 transition-colors"
-                  title="Apply current color highlight"
-                >
-                  <Highlighter className="w-4 h-4 text-teal-500 animate-pulse" />
-                  <span>Highlight</span>
-                </button>
-
-                {selectedHighlightIds.length > 0 && (
+              {/* ─── TOOLBAR VIEW ─── */}
+              {popupMode === "toolbar" && (
+                <div className="flex items-center justify-around py-1">
+                  {/* Highlight */}
                   <button
-                    onClick={handleRemoveSelectedHighlights}
-                    className="flex flex-col items-center text-[9px] font-semibold text-gray-500 hover:text-rose-600 transition-colors"
-                    title="Remove highlight from this selection"
+                    onClick={() => setPopupMode("colors")}
+                    className="flex flex-col items-center gap-1.5 min-w-[44px] group"
                   >
-                    <RotateCcw className="w-4 h-4 text-rose-500" />
-                    <span>Unhighlight</span>
+                    <div className="w-9 h-9 rounded-full flex items-center justify-center transition-transform group-hover:scale-110"
+                      style={{ backgroundColor: "#E8D87D" }}>
+                      <Highlighter className="w-4 h-4" style={{ color: "#5A5020" }} />
+                    </div>
+                    <span className="text-[10px] font-semibold" style={{ color: "var(--ink-secondary)" }}>
+                      Highlight
+                    </span>
                   </button>
-                )}
 
-                {/* 2. Custom Notes Button toggler */}
-                <button
-                  onClick={() => setAddingNote(!addingNote)}
-                  className="flex flex-col items-center text-[9px] font-semibold text-gray-500 hover:text-teal-600 transition-colors"
-                >
-                  <BookMarked className="w-4 h-4 text-amber-500" />
-                  <span>Add Note</span>
-                </button>
+                  {/* Look Up */}
+                  <button
+                    onClick={() => {
+                      toggleRightSidebar();
+                      setToolbarSelection(null);
+                      setPopupMode("toolbar");
+                    }}
+                    className="flex flex-col items-center gap-1.5 min-w-[44px] group"
+                  >
+                    <div className="w-9 h-9 rounded-full flex items-center justify-center transition-all group-hover:scale-110"
+                      style={{ backgroundColor: "var(--surface-hover)" }}>
+                      <Search className="w-4 h-4" style={{ color: "var(--ink-primary)" }} />
+                    </div>
+                    <span className="text-[10px] font-semibold" style={{ color: "var(--ink-secondary)" }}>
+                      Look Up
+                    </span>
+                  </button>
 
-                {/* 3. Narrate Here button */}
-                <button
-                  onClick={() => {
-                    onJumpTo(toolbarSelection.startParagraphIndex, toolbarSelection.startSentenceIndex);
-                    setIsPlaying(true);
-                  }}
-                  className="flex flex-col items-center text-[9px] font-semibold text-gray-500 hover:text-teal-600 transition-colors"
-                >
-                  <Play className="w-4 h-4 text-green-500 fill-green-500/10" />
-                  <span>Speak Here</span>
-                </button>
-              </div>
+                  {/* Note */}
+                  <button
+                    onClick={() => setPopupMode("note")}
+                    className="flex flex-col items-center gap-1.5 min-w-[44px] group"
+                  >
+                    <div className="w-9 h-9 rounded-full flex items-center justify-center transition-all group-hover:scale-110"
+                      style={{ backgroundColor: "var(--surface-hover)" }}>
+                      <FileText className="w-4 h-4" style={{ color: "var(--ink-primary)" }} />
+                    </div>
+                    <span className="text-[10px] font-semibold" style={{ color: "var(--ink-secondary)" }}>
+                      Note
+                    </span>
+                  </button>
 
-              {/* Color Dot Palette */}
-              <div className="flex flex-col gap-1 select-none">
-                <span className="text-[8px] font-semibold text-gray-400 dark:text-gray-500 font-mono text-center">Tap to highlight color:</span>
-                <div className="flex gap-2 justify-center py-0.5">
-                  {[
-                    { class: "bg-teal-500/20 border-l-2 border-teal-500", dot: "bg-teal-400" },
-                    { class: "bg-yellow-500/25 border-l-2 border-yellow-500", dot: "bg-yellow-400" },
-                    { class: "bg-purple-500/20 border-l-2 border-purple-500", dot: "bg-purple-400" },
-                    { class: "bg-indigo-505/20 border-l-2 border-indigo-500", dot: "bg-indigo-400" },
-                    { class: "bg-rose-500/20 border-l-2 border-rose-500", dot: "bg-rose-400" },
-                  ].map((col, i) => (
+                  {/* Copy */}
+                  <button
+                    onClick={handleCopySelection}
+                    className="flex flex-col items-center gap-1.5 min-w-[44px] group relative"
+                  >
+                    <div className="w-9 h-9 rounded-full flex items-center justify-center transition-all group-hover:scale-110"
+                      style={{ backgroundColor: "var(--surface-hover)" }}>
+                      <Copy className="w-4 h-4" style={{ color: "var(--ink-primary)" }} />
+                    </div>
+                    <span className="text-[10px] font-semibold" style={{ color: "var(--ink-secondary)" }}>
+                      {copiedFlash ? "Copied!" : "Copy"}
+                    </span>
+                  </button>
+
+                  {/* Pin */}
+                  <button
+                    onClick={handlePinSelection}
+                    className="flex flex-col items-center gap-1.5 min-w-[44px] group"
+                  >
+                    <div className="w-9 h-9 rounded-full flex items-center justify-center transition-all group-hover:scale-110"
+                      style={{ backgroundColor: "var(--surface-hover)" }}>
+                      <Pin className="w-4 h-4" style={{ color: "var(--ink-primary)" }} />
+                    </div>
+                    <span className="text-[10px] font-semibold" style={{ color: "var(--ink-secondary)" }}>
+                      Pin
+                    </span>
+                  </button>
+
+                  {/* Unhighlight (only if selection is already highlighted) */}
+                  {selectedHighlightIds.length > 0 && (
                     <button
-                      key={i}
-                      onClick={() => handleColorHighlightSelect(col.class)}
-                      className={`w-4 h-4 rounded-full ${col.dot} border border-white dark:border-zinc-800 shadow-sm transition-all hover:scale-120 active:scale-90`}
-                      title="Instant Highlight"
-                    />
-                  ))}
+                      onClick={handleRemoveSelectedHighlights}
+                      className="flex flex-col items-center gap-1.5 min-w-[44px] group"
+                    >
+                      <div className="w-9 h-9 rounded-full flex items-center justify-center transition-all group-hover:scale-110"
+                        style={{ backgroundColor: "rgba(184, 84, 80, 0.1)" }}>
+                        <RotateCcw className="w-4 h-4" style={{ color: "var(--status-failed)" }} />
+                      </div>
+                      <span className="text-[10px] font-semibold" style={{ color: "var(--status-failed)" }}>
+                        Remove
+                      </span>
+                    </button>
+                  )}
                 </div>
-              </div>
+              )}
 
-              {/* Text note field container */}
-              {addingNote && (
-                <div className="space-y-1.5 border-t dark:border-white/5 pt-2">
-                  <input
-                    type="text"
-                    placeholder="Enter contextual notes..."
-                    required
-                    value={noteInput}
-                    onChange={(e) => setNoteInput(e.target.value)}
-                    className="w-full bg-gray-50 dark:bg-zinc-950 border border-gray-150 dark:border-white/5 text-[11px] px-2 py-1.5 rounded focus:outline-none dark:text-gray-250 font-sans"
-                  />
-                  <button
-                    onClick={executeHighlight}
-                    className="w-full bg-teal-600 text-white text-[10px] font-semibold py-1 rounded hover:bg-teal-500 transition-colors shadow-sm"
-                  >
-                    Save Note Highlight
-                  </button>
+              {/* ─── COLOR PICKER VIEW ─── */}
+              {popupMode === "colors" && (
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setPopupMode("toolbar")}
+                      className="p-1.5 rounded-lg transition-colors"
+                      style={{ color: "var(--ink-muted)" }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--surface-hover)"}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
+                    <span className="text-xs font-semibold" style={{ color: "var(--ink-primary)" }}>
+                      Choose color
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-around py-1">
+                    {[
+                      { name: "Aqua", class: "bg-[#7EC8C8]/25 border-l-2 border-[#7EC8C8]", dot: "#7EC8C8" },
+                      { name: "Pink", class: "bg-[#E8A0A0]/25 border-l-2 border-[#E8A0A0]", dot: "#E8A0A0" },
+                      { name: "Orange", class: "bg-[#E8B87D]/25 border-l-2 border-[#E8B87D]", dot: "#E8B87D" },
+                      { name: "Yellow", class: "bg-[#E8D87D]/25 border-l-2 border-[#E8D87D]", dot: "#E8D87D" },
+                      { name: "Green", class: "bg-[#7EC88A]/25 border-l-2 border-[#7EC88A]", dot: "#7EC88A" },
+                    ].map((col) => (
+                      <button
+                        key={col.name}
+                        onClick={() => handleColorHighlightSelect(col.class)}
+                        className="flex flex-col items-center gap-1.5 min-w-[36px] group"
+                      >
+                        <div
+                          className="w-8 h-8 rounded-full border-2 transition-all group-hover:scale-110 group-active:scale-95"
+                          style={{
+                            backgroundColor: col.dot,
+                            borderColor: `${col.dot}80`,
+                          }}
+                        />
+                        <span className="text-[9px] font-medium" style={{ color: "var(--ink-secondary)" }}>
+                          {col.name}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ─── NOTE INPUT VIEW ─── */}
+              {popupMode === "note" && (
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setPopupMode("toolbar")}
+                      className="p-1.5 rounded-lg transition-colors"
+                      style={{ color: "var(--ink-muted)" }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--surface-hover)"}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
+                    <span className="text-xs font-semibold" style={{ color: "var(--ink-primary)" }}>
+                      Add note
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      placeholder="Enter your note..."
+                      value={noteInput}
+                      onChange={(e) => setNoteInput(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl text-xs border focus:outline-none transition-colors"
+                      style={{
+                        backgroundColor: "var(--surface-page)",
+                        borderColor: "var(--border-strong)",
+                        color: "var(--ink-primary)",
+                      }}
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          setPopupMode("toolbar");
+                          setNoteInput("");
+                        }}
+                        className="flex-1 py-2 rounded-xl text-[11px] font-medium border transition-all"
+                        style={{
+                          backgroundColor: "transparent",
+                          borderColor: "var(--border-strong)",
+                          color: "var(--ink-secondary)",
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={executeHighlight}
+                        className="flex-1 py-2 rounded-xl text-[11px] font-semibold text-white transition-all"
+                        style={{ backgroundColor: "var(--accent)" }}
+                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--accent-hover)"}
+                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "var(--accent)"}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
